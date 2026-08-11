@@ -7,6 +7,11 @@ import type { ModelCatalog } from "./types.js";
  * claims of exact capability. They are maintained from public provider
  * materials and leaderboards, including Artificial Analysis, without copying
  * or redistributing any third-party scores.
+ *
+ * Note: the `bigpickle` provider (`opencode/big-pickle`) is intentionally absent
+ * here. It publishes no quota API; its 5h/24h caps are behavioral inferences
+ * from local OpenCode request history, so `src/interpretation.ts` reports its
+ * windows with unknown/estimated semantics rather than as catalog model quota.
  */
 export const MODEL_CATALOG: ModelCatalog = {
   version: "2026-08-05",

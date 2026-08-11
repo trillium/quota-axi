@@ -4,7 +4,8 @@ export type ProviderId =
   | "cursor"
   | "copilot"
   | "grok"
-  | "kimi";
+  | "kimi"
+  | "bigpickle";
 
 export const PROVIDER_IDS = [
   "claude",
@@ -13,6 +14,7 @@ export const PROVIDER_IDS = [
   "copilot",
   "grok",
   "kimi",
+  "bigpickle",
 ] as const satisfies readonly ProviderId[];
 
 export type ProviderSource =
@@ -20,6 +22,7 @@ export type ProviderSource =
   | "cli-rpc"
   | "api"
   | "web"
+  | "local"
   | "cache"
   | "unavailable";
 
