@@ -327,6 +327,7 @@ It is generated from `src/skill.ts`; update it with `pnpm run build:skill` and v
 | `--tui`                                            | Render the live human terminal report instead of TOON (quota only) |
 | `--refresh 30s\|5m\|1h`                            | Live `--tui` refresh interval, default 5m (30s-24h)                |
 | `--once`                                           | Render one `--tui` frame and exit instead of staying live          |
+| `--active-only`                                    | `--tui` only: show only providers with an active subscription      |
 | `--allow-keychain-prompt`                          | Permit macOS Claude Keychain access that could prompt              |
 | `--intelligence high\|medium\|low`                 | Filter `models` by editorial intelligence bucket                   |
 | `--sort runway`                                    | Explicitly sort `models` by documented usable-runway evidence      |
@@ -342,7 +343,7 @@ It is generated from `src/skill.ts`; update it with `pnpm run build:skill` and v
 - Each live card leads with the `effective[]` rollup (min across bounding windows), colored by headroom: >=50% healthy, 20-50% tight, <20% critical. Per-window rows, including per-model breakouts, are the supporting detail.
 - The bar fill is current headroom; the `┃` marker sits at `pace.timeRemainingPercent`, the fill position of exactly linear burn. Fill ending left of the marker means burning faster than the reset clock. The marker is omitted when pace is unknown.
 - Pace is shown by the bar and marker alone, never as a numeric burn multiple. The runway verdict on the headline reads `on pace ✓` for `through_reset` and `empty in 7h 21m` for `projected_exhaustion`. Two-up rows keep both card bottoms aligned by padding the shorter card inside its border. The JSON and TOON surfaces keep the `through_reset` vocabulary and the full `pace` object.
-- Signed-out and failed providers stay visible as dimmed cards and are excluded from the fleet totals in the header.
+- Signed-out and failed providers stay visible as dimmed cards and are excluded from the fleet totals in the header. Pass `--active-only` to hide them and render only providers with an active subscription (the fresh/stale live cards); the header then reports how many were hidden, and if nothing is live it prints `no providers with active subscriptions` rather than an empty grid. It is off by default and, like `--refresh`/`--once`, only valid with `--tui`.
 - Width comes from the terminal, clamped to 80-120 columns; below the two-up width the grid reflows to one column. Color honors `NO_COLOR`, `TERM=dumb`, and non-TTY stdout (the glyph skeleton is kept), re-enables with `FORCE_COLOR`, and uses truecolor when `COLORTERM` advertises it, falling back to 256-color then ANSI-16.
 - `--tui` composes with `--provider` scoping and `--full` (account identity and source-attempt footers). It is mutually exclusive with `--json` and only supported by the `quota` command.
 

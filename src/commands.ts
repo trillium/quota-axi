@@ -64,6 +64,7 @@ async function quotaTuiReport(
         process.stdout.isTTY === true,
       ),
       full: flags.full,
+      activeOnly: flags.activeOnly,
       ...(footerHint === undefined ? {} : { footerHint }),
     });
 
