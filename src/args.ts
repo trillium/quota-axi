@@ -13,6 +13,8 @@ export type QuotaFlags = {
   refreshSeconds?: number;
   /** Render one `--tui` frame and exit instead of staying live. */
   once: boolean;
+  /** `--tui` only: hide providers without an active subscription. */
+  activeOnly: boolean;
 };
 
 /** Refresh bounds: fast enough to feel live, slow enough to stay polite. */
@@ -73,6 +75,7 @@ function parseCommonFlags(
   let full = false;
   let tui = false;
   let once = false;
+  let activeOnly = false;
   let refreshSeconds: number | undefined;
   let allowKeychainPrompt = false;
   let intelligence: IntelligenceBucket | undefined;
@@ -97,6 +100,10 @@ function parseCommonFlags(
     }
     if (arg === "--once") {
       once = true;
+      continue;
+    }
+    if (arg === "--active-only") {
+      activeOnly = true;
       continue;
     }
     if (arg === "--refresh") {
@@ -165,7 +172,13 @@ function parseCommonFlags(
     );
   }
   const liveOnlyFlag =
-    refreshSeconds !== undefined ? "--refresh" : once ? "--once" : undefined;
+    refreshSeconds !== undefined
+      ? "--refresh"
+      : once
+        ? "--once"
+        : activeOnly
+          ? "--active-only"
+          : undefined;
   if (liveOnlyFlag && !tui) {
     throw new AxiError(
       `${liveOnlyFlag} is only supported with --tui`,
@@ -183,6 +196,7 @@ function parseCommonFlags(
     full,
     tui,
     once,
+    activeOnly,
     allowKeychainPrompt,
     ...(refreshSeconds !== undefined ? { refreshSeconds } : {}),
     ...(intelligence ? { intelligence } : {}),

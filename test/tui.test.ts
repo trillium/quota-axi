@@ -773,6 +773,59 @@ describe("color handling", () => {
     );
   });
 
+  it("renders every provider when --active-only is off (regression)", () => {
+    const all = render().join("\n");
+    // Default off must be byte-identical to omitting the option entirely.
+    expect(render({ activeOnly: false }).join("\n")).toBe(all);
+    expect(all).toContain("● claude");
+    expect(all).toContain("● codex");
+    expect(all).toContain("● grok");
+    expect(all).toContain("○ cursor");
+    expect(all).toContain("○ copilot");
+    expect(all).toContain("○ kimi");
+    expect(all).toContain("3 live · 3 signed out");
+  });
+
+  it("shows only active-subscription providers with --active-only", () => {
+    const lines = render({ activeOnly: true });
+    const joined = lines.join("\n");
+    expect(joined).toContain("● claude");
+    expect(joined).toContain("● codex");
+    expect(joined).toContain("● grok");
+    expect(joined).not.toContain("cursor");
+    expect(joined).not.toContain("copilot");
+    expect(joined).not.toContain("kimi");
+    expect(joined).not.toContain("signed out");
+    expect(joined).not.toContain("excluded from fleet totals");
+    // Header stays accurate: three live, three hidden rather than a breakdown
+    // that would name cards no longer on screen.
+    expect(lines[0]).toBe(
+      "  quota-axi · 2026-08-06 16:21 PDT · 3 live · 3 hidden",
+    );
+  });
+
+  it("prints a notice instead of an empty grid when nothing is active", () => {
+    const response: QuotaAxiResponse = {
+      generatedAt: GENERATED_AT,
+      schemaVersion: 3,
+      providers: [
+        signedOutProvider("cursor", "Cursor sign-in required"),
+        signedOutProvider("copilot", "GitHub Copilot sign-in required"),
+      ],
+    };
+    const lines = renderQuotaTui(response, {
+      timeZone: "America/Los_Angeles",
+      activeOnly: true,
+    }).split("\n");
+    const joined = lines.join("\n");
+    expect(joined).toContain("no providers with active subscriptions");
+    expect(joined).not.toContain("○ cursor");
+    expect(joined).not.toContain("╭─");
+    expect(lines[0]).toBe(
+      "  quota-axi · 2026-08-06 16:21 PDT · 0 live · 2 hidden",
+    );
+  });
+
   it("detects color depth from the environment", () => {
     expect(detectTuiColorDepth({}, false)).toBe("none");
     expect(detectTuiColorDepth({ NO_COLOR: "" }, true)).toBe("none");

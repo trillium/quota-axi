@@ -80,11 +80,14 @@ describe("CLI flag parsing", () => {
         full: true,
         tui: false,
         once: false,
+        activeOnly: false,
         allowKeychainPrompt: true,
       },
     );
     expect(parseFlags(["--tui"]).tui).toBe(true);
     expect(parseFlags(["--tui", "--once"]).once).toBe(true);
+    expect(parseFlags(["--tui", "--active-only"]).activeOnly).toBe(true);
+    expect(parseFlags(["--tui"]).activeOnly).toBe(false);
   });
 
   it("parses whole-unit refresh intervals for the live report", () => {
@@ -117,6 +120,9 @@ describe("CLI flag parsing", () => {
     );
     expect(() => parseModelsFlags(["--once"])).toThrow(
       "--once is only supported with --tui",
+    );
+    expect(() => parseFlags(["--active-only"])).toThrow(
+      "--active-only is only supported with --tui",
     );
   });
 

@@ -25,6 +25,12 @@ export type TuiOptions = {
   timeZone?: string;
   /** Dim closing line used by the live report for its key hint. */
   footerHint?: string;
+  /**
+   * Mirrors `--active-only`: render only providers with an active subscription
+   * (fresh/stale live cards), hiding signed-out and failed providers. Default
+   * off; the header still reports how many were hidden.
+   */
+  activeOnly?: boolean;
 };
 
 const CARD_WIDTH = 49;
@@ -128,16 +134,27 @@ export function renderQuotaTui(
   const generatedAtMs = Date.parse(response.generatedAt);
   const timeZone = options.timeZone;
 
-  const ordered = [
-    ...response.providers.filter(isLive),
-    ...response.providers.filter((provider) => !isLive(provider)),
-  ];
+  const activeOnly = options.activeOnly ?? false;
+  const ordered = activeOnly
+    ? response.providers.filter(isLive)
+    : [
+        ...response.providers.filter(isLive),
+        ...response.providers.filter((provider) => !isLive(provider)),
+      ];
   const cards = ordered.map((provider) => buildCard(provider, generatedAtMs));
 
   const lines: Line[] = [];
-  lines.push([{ text: `  ${headerText(response, timeZone)}`, style: "dim" }]);
+  lines.push([
+    { text: `  ${headerText(response, activeOnly, timeZone)}`, style: "dim" },
+  ]);
   lines.push([]);
-  lines.push(...layoutCards(cards, twoColumn));
+  if (activeOnly && ordered.length === 0) {
+    lines.push([
+      { text: "  no providers with active subscriptions", style: "dim" },
+    ]);
+  } else {
+    lines.push(...layoutCards(cards, twoColumn));
+  }
   if (options.full) {
     lines.push([]);
     for (const provider of ordered) {
@@ -162,18 +179,29 @@ function isLive(provider: ProviderQuota): boolean {
   return provider.state.status === "fresh" || provider.state.status === "stale";
 }
 
-function headerText(response: QuotaAxiResponse, timeZone?: string): string {
+function headerText(
+  response: QuotaAxiResponse,
+  activeOnly: boolean,
+  timeZone?: string,
+): string {
   const live = response.providers.filter(isLive).length;
-  const signedOut = response.providers.filter(
-    (provider) => provider.state.status === "auth_required",
-  ).length;
-  const failed = response.providers.length - live - signedOut;
   const parts = [
     "quota-axi",
     formatHeaderTime(response.generatedAt, timeZone),
     `${live} live`,
-    `${signedOut} signed out`,
   ];
+  if (activeOnly) {
+    // Filtered view hides non-live cards; report the hidden count instead of
+    // signed-out/unavailable breakdowns that would name cards that aren't shown.
+    const hidden = response.providers.length - live;
+    if (hidden > 0) parts.push(`${hidden} hidden`);
+    return parts.filter(Boolean).join(" · ");
+  }
+  const signedOut = response.providers.filter(
+    (provider) => provider.state.status === "auth_required",
+  ).length;
+  const failed = response.providers.length - live - signedOut;
+  parts.push(`${signedOut} signed out`);
   if (failed > 0) parts.push(`${failed} unavailable`);
   return parts.filter(Boolean).join(" · ");
 }
