@@ -14,6 +14,7 @@ const PROVIDER_SOURCES = [
   "cli-rpc",
   "api",
   "web",
+  "local",
   "cache",
   "unavailable",
 ] as const satisfies readonly ProviderSource[];

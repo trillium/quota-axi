@@ -94,6 +94,11 @@ function semanticsFor(
         provider.windows,
         `quota-axi does not know whether ${provider.label}'s reported windows are independent or jointly bounding, so it does not claim an effective remaining percentage.`,
       );
+    case "bigpickle":
+      return unknownSemantics(
+        provider.windows,
+        `${provider.label} publishes no quota API, so quota-axi infers its caps from local OpenCode request history. The used/limit numbers are estimates, so it does not claim an effective remaining percentage.`,
+      );
   }
 }
 
