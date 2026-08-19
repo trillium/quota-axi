@@ -21,7 +21,7 @@ flags[11]:
 examples:
   quota-axi
   quota-axi --provider claude
-  quota-axi --provider cursor,copilot,grok,kimi,zai
+  quota-axi --provider cursor,copilot,grok,kimi,zai,antigravity
   quota-axi --json
   quota-axi --full
   quota-axi --tui

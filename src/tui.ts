@@ -74,6 +74,7 @@ const ACCENTS: Record<ProviderId, StyleSpec> = {
   grok: { rgb: [180, 190, 254], ansi16: "95", bold: true },
   kimi: { rgb: [245, 194, 231], ansi16: "95", bold: true },
   zai: { rgb: [129, 216, 209], ansi16: "96", bold: true },
+  antigravity: { rgb: [166, 227, 161], ansi16: "92", bold: true },
 };
 
 const STYLES: Record<Exclude<StyleName, `accent:${ProviderId}`>, StyleSpec> = {

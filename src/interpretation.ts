@@ -106,6 +106,11 @@ function semanticsFor(
         provider.windows,
         `quota-axi does not know whether ${provider.label ?? provider.provider}'s reported windows are independent or jointly bounding, so it does not claim an effective remaining percentage.`,
       );
+    case "antigravity":
+      return unknownSemantics(
+        provider.windows,
+        "Antigravity's print-mode buckets do not prove shared or model-scoped relationships, so quota-axi reports raw windows without claiming effective remaining percentage.",
+      );
   }
 }
 

@@ -15,10 +15,10 @@ Quota CLI for agents - designed with [AXI](https://axi.md) (Agent eXperience Int
 Agents need quota state before they choose where work can safely run.
 Vendor dashboards are not shaped for shell automation, and local CLIs expose different windows, resets, and auth sources.
 
-quota-axi reports local Claude, Codex, Cursor, GitHub Copilot, Grok, Kimi, and Z.AI quota windows in one [AXI](https://axi.md)-shaped call.
+quota-axi reports local Claude, Codex, Cursor, GitHub Copilot, Grok, Kimi, and Z.AI quota windows by default, plus an explicit-only Antigravity view, in one [AXI](https://axi.md)-shaped call.
 It is data only: it never routes, recommends a provider, model, harness, credential, or route, proxies, intercepts, logs in, imports browser cookies, or mutates provider state. Default output has no ordering preference. The opt-in `models --sort runway` surface applies only its documented deterministic comparator to quota evidence, preserves all evidence and explicit ties, and is not a recommendation. It publishes one derived per-scope comparative selection signal, [`selection`](#per-scope-selection-signal), as data computed from figures it already reports; the consumer, not quota-axi, does any routing or ranking with it.
 
-- **Official sources** - quota-axi reads local provider auth sources and calls first-party quota, usage, billing, entitlement, or read-only credential-liveness endpoints used by the local agents, with a read-only Codex app-server probe as fallback.
+- **Official sources** - quota-axi reads local provider auth sources and calls first-party quota, usage, billing, entitlement, or read-only credential-liveness endpoints used by the local agents, with a read-only Codex app-server probe as fallback. Antigravity uses only the documented `agy -p "/usage" --output-format json` print surface from CLI 1.1.11+.
 - **Local first** - quota and auth reports run on the machine that holds the credentials; their network calls go to first-party provider endpoints, never a third-party relay.
   The separate `update` command contacts npm only when the user runs it.
 - **Token efficient** - default stdout is compact TOON so agents spend fewer tokens parsing quota state, with `--json` available when a caller needs the normalized model.
@@ -294,19 +294,19 @@ It is generated from `src/skill.ts`; update it with `pnpm run build:skill` and v
 
 ### Flags
 
-| Flag                                                   | Description                                                        |
-| ------------------------------------------------------ | ------------------------------------------------------------------ |
-| `--provider claude,codex,cursor,copilot,grok,kimi,zai` | Scope providers                                                    |
-| `--json`                                               | Emit normalized JSON instead of TOON for quota, auth, or models    |
-| `--full`                                               | Include audit and derivation details                               |
-| `--tui`                                                | Render the live human terminal report instead of TOON (quota only) |
-| `--refresh 30s\|5m\|1h`                                | Live `--tui` refresh interval, default 5m (30s-24h)                |
-| `--once`                                               | Render one `--tui` frame and exit instead of staying live          |
-| `--allow-keychain-prompt`                              | Permit macOS provider Keychain access that could prompt            |
-| `--intelligence high\|medium\|low`                     | Filter `models` by editorial intelligence bucket                   |
-| `--sort runway`                                        | Explicitly sort `models` by documented usable-runway evidence      |
-| `-h`, `--help`                                         | Print terse [AXI](https://axi.md) help                             |
-| `-v`, `-V`, `--version`                                | Print version                                                      |
+| Flag                                                               | Description                                                        |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `--provider claude,codex,cursor,copilot,grok,kimi,zai,antigravity` | Scope providers; Antigravity is explicit-only                      |
+| `--json`                                                           | Emit normalized JSON instead of TOON for quota, auth, or models    |
+| `--full`                                                           | Include audit and derivation details                               |
+| `--tui`                                                            | Render the live human terminal report instead of TOON (quota only) |
+| `--refresh 30s\|5m\|1h`                                            | Live `--tui` refresh interval, default 5m (30s-24h)                |
+| `--once`                                                           | Render one `--tui` frame and exit instead of staying live          |
+| `--allow-keychain-prompt`                                          | Permit macOS provider Keychain access that could prompt            |
+| `--intelligence high\|medium\|low`                                 | Filter `models` by editorial intelligence bucket                   |
+| `--sort runway`                                                    | Explicitly sort `models` by documented usable-runway evidence      |
+| `-h`, `--help`                                                     | Print terse [AXI](https://axi.md) help                             |
+| `-v`, `-V`, `--version`                                            | Print version                                                      |
 
 ### Human terminal report (`--tui`)
 
@@ -536,8 +536,8 @@ Any bounding window without usable pace makes the **whole scope** unmeasurable: 
 | Name                             | Values                                                                       |
 | -------------------------------- | ---------------------------------------------------------------------------- |
 | Provider statuses                | `fresh`, `stale`, `unavailable`, `auth_required`, `rate_limited`, or `error` |
-| Provider sources                 | `oauth`, `cli-rpc`, `api`, `web`, `cache`, or `unavailable`                  |
-| Current provider adapter sources | `oauth`, `cli-rpc`, `api`, `web`, `cache`, and `unavailable`                 |
+| Provider sources                 | `oauth`, `cli-rpc`, `cli-print`, `api`, `web`, `cache`, or `unavailable`     |
+| Current provider adapter sources | `oauth`, `cli-rpc`, `cli-print`, `api`, `web`, `cache`, and `unavailable`    |
 | Window kinds                     | `session`, `weekly`, `monthly`, `model`, `credits`, or `unknown`             |
 | Window pace statuses             | `ahead`, `on_pace`, `behind`, or `unknown`                                   |
 | Effective pace statuses          | `ahead`, `on_pace`, `behind`, `mixed`, or `unknown`                          |
@@ -563,6 +563,7 @@ Source attempts can include `credentialPresent` when a non-secret probe confirms
 | Grok proto3 zero       | For the exact consumer operation only, an omitted usage float is the official proto3 zero when a valid weekly or monthly current period proves the config is present; quota-axi reports `0` used and `100` remaining rather than deriving usage from money.                                                                                                                                                                                                                                                                                                                                                      |
 | Kimi                   | Reports the principal `weekly` subscription window (with trusted 604,800s duration) plus every valid self-described limit in wire order. Only a limit whose normalized duration is exactly 18,000 seconds is identified as `five_hour`; future limits remain `limit:<index>` unknown windows.                                                                                                                                                                                                                                                                                                                    |
 | Z.AI                   | Can report the Coding Plan `five_hour` and `weekly` token windows (with trusted 18,000s and 604,800s durations) plus the `mcp_month` tool window, whose duration is not invented. The two token limits are identified by the endpoint's own `unit`/`number` values rather than array position; any other limit, or a repeat of an already reported one, degrades to an untrusted `limit:<index>` unknown window named in `state.untrustedWindowIds`.                                                                                                                                                             |
+| Antigravity            | Explicit-only `cli-print` usage windows from the documented `agy -p "/usage" --output-format json` surface. Observed `5h` and `weekly` periods receive cycle kinds/durations; unfamiliar periods remain `unknown` and diagnostic. Live groups may omit `id`, in which case their safe bucket IDs remain authoritative.                                                                                                                                                                                                                                                                                           |
 
 ### Model catalog and `models`
 
@@ -584,10 +585,10 @@ Default model order is deterministic and non-preferential: provider, then model 
 
 Auth source entries can include `credentialPresent` when a non-secret probe confirms a credential item exists.
 
-| Name                 | Values                                                                                                                                                                                          |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth source statuses | `available`, `missing`, `invalid`, `expired`, `skipped`, or `error`                                                                                                                             |
-| Auth source names    | `oauth-file`, `keychain`, `auth-json`, `auth-env`, `apps-json`, `state-vscdb`, `cli-keychain`, `cli-authfile`, `cli-rpc`, `pi:kimi-coding`, `pi:xai`, `kimi-code-cli`, and `opencode:auth.json` |
+| Name                 | Values                                                                                                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Auth source statuses | `available`, `missing`, `invalid`, `expired`, `skipped`, or `error`                                                                                                                                          |
+| Auth source names    | `oauth-file`, `keychain`, `auth-json`, `auth-env`, `apps-json`, `state-vscdb`, `cli-keychain`, `cli-authfile`, `cli-rpc`, `cli-print`, `pi:kimi-coding`, `pi:xai`, `kimi-code-cli`, and `opencode:auth.json` |
 
 ## Security Posture
 
@@ -602,6 +603,7 @@ Auth source entries can include `credentialPresent` when a non-secret probe conf
 | Grok           | Grok CLI session auth from `$GROK_AUTH_JSON`, inline `$GROK_AUTH`, `$GROK_AUTH_PATH`, or `$GROK_HOME/auth.json` / `~/.grok/auth.json`, plus Pi's independent `$PI_CODING_AGENT_DIR/auth.json` `xai` entry (default `~/.pi/agent/auth.json`) for OAuth or literal API-key model auth                                                                                                                                            |
 | Kimi           | Pi's `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`) for a literal `kimi-coding` API key or unexpired OAuth access token first, then a fresh official Kimi Code CLI access token from `$KIMI_CODE_HOME/credentials/kimi-code.json` (default `$HOME/.kimi-code/credentials/kimi-code.json`)                                                                                                                  |
 | Z.AI           | opencode's `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` when set, otherwise `~/.local/share/opencode/auth.json`) for a literal Coding Plan API key under `zai-coding-plan`, `zai`, `z-ai`, `z.ai`, `zhipu`, or `zhipuai`                                                                                                                                                                                                   |
+| Antigravity    | Executable discovery for `agy` (or `$QUOTA_AXI_AGY_BINARY`) only; the quota child uses the CLI's existing system-keyring session through the real home/current-user environment, while quota-axi never reads or copies Antigravity credentials, keyrings, or browser cookies                                                                                                                                                   |
 
 ### Provider notes
 
@@ -665,6 +667,14 @@ Auth source entries can include `credentialPresent` when a non-secret probe conf
 - Definitive credential absence, an unparseable credential file, and HTTP 401/403 retire Z.AI cache data. An auth file that exists but cannot be read is an indeterminate local failure rather than a sign-out, so it reports `state.status: error` and stays cache-eligible. Timeout, network, 408, 429, 5xx, oversized-response, and unreadable-auth-file failures may reuse a formerly fresh snapshot with reset-expired windows removed and, for windows without a reset, five-hour, seven-day, or thirty-day age bounds by window kind; a resetless untrusted unknown window has no age bound of its own and is dropped.
 - It never launches opencode, refreshes or writes credentials, sends cookies, retains raw responses, or exposes the account's key or plan identity beyond the plan label the endpoint reports.
 
+**Antigravity**
+
+- Antigravity is explicit-selection-only: bare/default `quota` and `auth` keep the default provider set and never launch `agy`.
+- With `--provider antigravity`, quota-axi requires the documented Antigravity CLI 1.1.11+ print surface and runs only `agy -p "/usage" --output-format json` directly, with no shell, credential copy, refresh, private RPC, model turn, or second version/recovery command.
+- The child retains the real `HOME` and minimal current-user/session variables so `agy` can use its own existing system-keyring authentication. It receives a private temporary cwd plus `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME`, all removed after success or failure; the temporary cwd avoids repository-local `.agents`/MCP discovery. Output is normalized to `cli-print` windows; raw JSON and stderr are never returned or cached.
+- `auth` checks only whether the configured executable is discoverable. The quota command is authoritative for session usability. With an existing session, the documented `/usage` path reports zero turns and tokens; without one, the vendor CLI is observed to fall back to browser sign-in. That explicit-only browser behavior is disclosed for maintainer policy rather than represented as a fail-closed guarantee, and quota-axi never completes or remedies login.
+- Antigravity buckets are diagnostic until the payload proves relationships. Effective remaining, model identity, account identity, and plan are not inferred from labels or additive groups. Only normalized fresh windows are cacheable; transient process failures may use normalized stale cache, while malformed/auth/unsupported results retire it.
+
 ### Safety guarantees
 
 - Quota and auth HTTP requests go only to first-party provider usage, quota, billing, entitlement, or read-only credential-liveness endpoints with the user's local credentials.
@@ -689,6 +699,7 @@ Auth source entries can include `credentialPresent` when a non-secret probe conf
 | Claude cache fallback                  | Definitive missing/invalid credential and HTTP 401/403 failures retire the snapshot. Only transient failures may use a formerly fresh snapshot, with a seven-day provider bound plus reset and resetless-window pruning.                                                                                                                                              |
 | Codex cache identities                 | Cached Codex windows are accepted only when ID, label, kind, duration, and duplicate suffix order agree; stale snapshots with mismatched identities are rejected.                                                                                                                                                                                                     |
 | Grok cache provenance                  | Only snapshots produced by the current `web` consumer operation can be used as Grok stale fallback; legacy `api` billing-proxy snapshots are rejected.                                                                                                                                                                                                                |
+| Antigravity cache provenance           | Only normalized fresh `cli-print` windows are cached; raw print output, stderr, identity, attempts, and derived pace are never persisted.                                                                                                                                                                                                                             |
 
 ## Development
 
