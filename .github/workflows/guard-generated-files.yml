@@ -26,7 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     # release-please owns CHANGELOG.md and .release-please-manifest.json; its PR
     # is the one legitimate place those files change, so we exempt its author.
+    # On the fork, release-please files arrive by merging upstream/main and
+    # cannot be regenerated here, so the guard only runs on the upstream repo.
     if: >-
+      github.repository == 'kunchenguid/quota-axi' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'release-please[bot]'
     steps:

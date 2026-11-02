@@ -358,7 +358,10 @@ function evaluateExpression(
 function gateRunsForAuthor(expression: ExpressionNode, login: string): boolean {
   return Boolean(
     evaluateExpression(expression, {
-      github: { event: { pull_request: { user: { login } } } },
+      github: {
+        repository: "kunchenguid/quota-axi",
+        event: { pull_request: { user: { login } } },
+      },
     }),
   );
 }
