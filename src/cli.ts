@@ -16,7 +16,7 @@ commands[3]:
 output:
   Default TOON reports local quota evidence. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (q quits).
 flags[12]:
-  --provider <claude,codex,cursor,copilot,grok,kimi,bigpickle>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --allow-keychain-prompt, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
+  --provider <claude,codex,cursor,copilot,grok,kimi,bigpickle,anthropic_api>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --allow-keychain-prompt, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
 examples:
   quota-axi
   quota-axi --provider claude

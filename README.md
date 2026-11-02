@@ -319,20 +319,20 @@ It is generated from `src/skill.ts`; update it with `pnpm run build:skill` and v
 
 ### Flags
 
-| Flag                                               | Description                                                        |
-| -------------------------------------------------- | ------------------------------------------------------------------ |
-| `--provider claude,codex,cursor,copilot,grok,kimi` | Scope providers                                                    |
-| `--json`                                           | Emit normalized JSON instead of TOON for quota, auth, or models    |
-| `--full`                                           | Include account, source attempts, and reserve details              |
-| `--tui`                                            | Render the live human terminal report instead of TOON (quota only) |
-| `--refresh 30s\|5m\|1h`                            | Live `--tui` refresh interval, default 5m (30s-24h)                |
-| `--once`                                           | Render one `--tui` frame and exit instead of staying live          |
-| `--active-only`                                    | `--tui` only: show only providers with an active subscription      |
-| `--allow-keychain-prompt`                          | Permit macOS Claude Keychain access that could prompt              |
-| `--intelligence high\|medium\|low`                 | Filter `models` by editorial intelligence bucket                   |
-| `--sort runway`                                    | Explicitly sort `models` by documented usable-runway evidence      |
-| `-h`, `--help`                                     | Print terse [AXI](https://axi.md) help                             |
-| `-v`, `-V`, `--version`                            | Print version                                                      |
+| Flag                                                                       | Description                                                        |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `--provider claude,codex,cursor,copilot,grok,kimi,bigpickle,anthropic_api` | Scope providers                                                    |
+| `--json`                                                                   | Emit normalized JSON instead of TOON for quota, auth, or models    |
+| `--full`                                                                   | Include account, source attempts, and reserve details              |
+| `--tui`                                                                    | Render the live human terminal report instead of TOON (quota only) |
+| `--refresh 30s\|5m\|1h`                                                    | Live `--tui` refresh interval, default 5m (30s-24h)                |
+| `--once`                                                                   | Render one `--tui` frame and exit instead of staying live          |
+| `--active-only`                                                            | `--tui` only: show only providers with an active subscription      |
+| `--allow-keychain-prompt`                                                  | Permit macOS Claude Keychain access that could prompt              |
+| `--intelligence high\|medium\|low`                                         | Filter `models` by editorial intelligence bucket                   |
+| `--sort runway`                                                            | Explicitly sort `models` by documented usable-runway evidence      |
+| `-h`, `--help`                                                             | Print terse [AXI](https://axi.md) help                             |
+| `-v`, `-V`, `--version`                                                    | Print version                                                      |
 
 ### Human terminal report (`--tui`)
 
@@ -489,6 +489,40 @@ Source attempts can include `credentialPresent` when a non-secret probe confirms
 | Grok                   | With a usable Grok CLI session bearer, can report the shared `credits` window, optional product-scoped `product:<slug>` windows, the current-period `startsAt` and reset, and optional prepaid credit balance from the consumer Usage-page operation. Pi `xai` auth alone establishes usability but cannot provide these consumer windows. Top-level `credits.remaining` is prepaid/on-demand balance, distinct from the shared period `windows` credits percentage used for effective availability. Pace prefers the startsAt/resetsAt pair.                          |
 | Grok proto3 zero       | For the exact consumer operation only, an omitted usage float is the official proto3 zero when a valid weekly or monthly current period proves the config is present; quota-axi reports `0` used and `100` remaining rather than deriving usage from money.                                                                                                                                                                                                                                                                                                            |
 | Kimi                   | Reports the principal `weekly` subscription window (with trusted 604,800s duration) plus every valid self-described limit in wire order. Only a limit whose normalized duration is exactly 18,000 seconds is identified as `five_hour`; future limits remain `limit:<index>` unknown windows.                                                                                                                                                                                                                                                                          |
+| Anthropic API credits  | `anthropic_api`: declared Anthropic Console credit grants, one `credits` window per unexpired grant (`grant:<expiry-date>`, soonest first) with `spentUsd`, `limitUsd`, `appliesTo` products, `startsAt` (granted) and `resetsAt` (expiry). Effective availability pools all grants and runway follows the earliest-expiring grant that still holds credit. Separate from the `claude` subscription windows; it never affects Claude headroom. See [Declared API credits](#declared-api-credits).                                                                      |
+
+### Declared API credits
+
+Anthropic documents no credit-balance endpoint (the Admin API only exposes usage and cost reports), so `anthropic_api` reads grants you declare in `~/.config/quota-axi/config.json` (`$XDG_CONFIG_HOME/quota-axi/config.json`, or `$QUOTA_AXI_CONFIG`). Copy the numbers from the Console "Credit balance" page:
+
+```json
+{
+  "credits": {
+    "asOf": "2026-11-02",
+    "grants": [
+      {
+        "remainingUsd": 75.43,
+        "totalUsd": 100,
+        "grantedAt": "2026-10-18",
+        "expiresAt": "2026-11-11",
+        "appliesTo": [
+          "Agent SDK",
+          "API",
+          "Batch API",
+          "Playground",
+          "Managed Agents"
+        ]
+      }
+    ]
+  }
+}
+```
+
+- Values are **declared, not measured**: `declared.basis` is `declared`, `declared.asOf` is your date, and TOON adds a `credits` table (remaining, total, products, expiry, as-of, stale) while `--tui` shows `declared <date>, not measured`.
+- A date-only `expiresAt` means 00:00 UTC that day. A grant at or past expiry drops out.
+- If `asOf` is more than 7 days old the provider is `stale` (`error: declared_value_stale`, `declared.stale: true`), so effective availability and runway are `unknown`.
+- Not cached, never sent anywhere, and no credentials are involved. Without a `credits` entry the provider is `unavailable` (`credits_not_declared`).
+- These credits pay for API and Agent SDK usage, not Claude subscription sessions or Claude Code cloud sessions.
 
 ### Model catalog and `models`
 
@@ -595,7 +629,7 @@ Auth source entries can include `credentialPresent` when a non-secret probe conf
 | Claude Keychain access marker          | Lives alongside the quota cache as `claude-keychain-access-granted[-<profile-hash>]-account-<account-hash>`; the profile hash is eight hexadecimal characters when applicable and the account hash is sixteen. It uses `0600` file permissions, contains no credential material or raw account name, and legacy service-only markers are ignored rather than deleted. |
 | Cached reports                         | Only fresh provider snapshots with windows are cached.                                                                                                                                                                                                                                                                                                                |
 | Fresh provider reports with no windows | Clear any cached snapshot for that provider, so entitlement-only reports do not leave stale quota windows behind.                                                                                                                                                                                                                                                     |
-| Reports and details not cached         | Failed providers, stale providers, account identity, and source attempts are not cached.                                                                                                                                                                                                                                                                              |
+| Reports and details not cached         | Failed providers, stale providers, declared (`anthropic_api`) values, account identity, and source attempts are not cached.                                                                                                                                                                                                                                           |
 | Claude cache fallback                  | Definitive missing/invalid credential and HTTP 401/403 failures retire the snapshot. Only transient failures may use a formerly fresh snapshot, with a seven-day provider bound plus reset and resetless-window pruning.                                                                                                                                              |
 | Codex cache identities                 | Cached Codex windows are accepted only when ID, label, kind, duration, and duplicate suffix order agree; stale snapshots with mismatched identities are rejected.                                                                                                                                                                                                     |
 | Grok cache provenance                  | Only snapshots produced by the current `web` consumer operation can be used as Grok stale fallback; legacy `api` billing-proxy snapshots are rejected.                                                                                                                                                                                                                |

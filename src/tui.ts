@@ -80,6 +80,7 @@ const ACCENTS: Record<ProviderId, StyleSpec> = {
   grok: { rgb: [180, 190, 254], ansi16: "95", bold: true },
   kimi: { rgb: [245, 194, 231], ansi16: "95", bold: true },
   bigpickle: { rgb: [166, 227, 161], ansi16: "92", bold: true },
+  anthropic_api: { rgb: [235, 160, 172], ansi16: "91", bold: true },
 };
 
 const STYLES: Record<Exclude<StyleName, `accent:${ProviderId}`>, StyleSpec> = {
@@ -495,6 +496,17 @@ function cardNotes(provider: ProviderQuota): string[] {
   }
   if (provider.state.remedyCommand) {
     notes.push(`run: ${provider.state.remedyCommand}`);
+  }
+  if (provider.declared) {
+    notes.push(
+      `declared ${provider.declared.asOf.slice(0, 10)}, not measured${
+        provider.declared.stale ? " · stale" : ""
+      }`,
+    );
+    const applies = provider.windows.find(
+      ({ appliesTo }) => appliesTo?.length,
+    )?.appliesTo;
+    if (applies) notes.push(`covers ${applies.join(", ")}`);
   }
   return notes;
 }

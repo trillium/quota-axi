@@ -1,3 +1,4 @@
+import { anthropicCreditsAdapter } from "./anthropic-credits.js";
 import { bigpickleAdapter } from "./bigpickle.js";
 import { claudeAdapter } from "./claude.js";
 import { codexAdapter } from "./codex.js";
@@ -19,6 +20,7 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   grok: grokAdapter,
   kimi: kimiAdapter,
   bigpickle: bigpickleAdapter,
+  anthropic_api: anthropicCreditsAdapter,
 };
 
 export function parseProviders(value: string | undefined): ProviderId[] {

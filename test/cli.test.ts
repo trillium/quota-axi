@@ -47,6 +47,7 @@ describe("CLI flag parsing", () => {
       "grok",
       "kimi",
       "bigpickle",
+      "anthropic_api",
     ]);
   });
 
@@ -75,6 +76,7 @@ describe("CLI flag parsing", () => {
           "grok",
           "kimi",
           "bigpickle",
+          "anthropic_api",
         ],
         json: true,
         full: true,
