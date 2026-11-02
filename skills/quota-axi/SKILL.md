@@ -17,6 +17,7 @@ metadata:
         grok,
         kimi,
         bigpickle,
+        anthropic-api-credits,
         cli,
       ]
     category: observability
@@ -94,6 +95,12 @@ or when comparing supported local provider headroom side by side.
    Grok also reads that same Pi auth file for an independent `xai` OAuth or literal API-key
    entry and treats Grok as usable when either the Grok CLI session or Pi `xai` credential is
    valid.
+10. `anthropic_api` is the Anthropic API credit balance (Agent SDK, API, Batch API, Playground,
+    Managed Agents), separate from the `claude` subscription windows and never part of its
+    headroom. Anthropic documents no balance endpoint, so quota-axi reads grants you declared in
+    `credits` in `~/.config/quota-axi/config.json` (`$QUOTA_AXI_CONFIG` overrides). Values are
+    declared, not measured: read `declared.asOf` and `declared.stale` (older than 7 days) before
+    trusting them. Expired grants drop out and runway follows the earliest-expiring grant.
 
 ## Usage
 
@@ -104,7 +111,7 @@ commands[3]:
 output:
   Default TOON reports local quota evidence. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (q quits).
 flags[12]:
-  --provider <claude,codex,cursor,copilot,grok,kimi,bigpickle>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --allow-keychain-prompt, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
+  --provider <claude,codex,cursor,copilot,grok,kimi,bigpickle,anthropic_api>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --allow-keychain-prompt, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
 examples:
   quota-axi
   quota-axi --provider claude

@@ -5,7 +5,8 @@ export type ProviderId =
   | "copilot"
   | "grok"
   | "kimi"
-  | "bigpickle";
+  | "bigpickle"
+  | "anthropic_api";
 
 export const PROVIDER_IDS = [
   "claude",
@@ -15,6 +16,7 @@ export const PROVIDER_IDS = [
   "grok",
   "kimi",
   "bigpickle",
+  "anthropic_api",
 ] as const satisfies readonly ProviderId[];
 
 export type ProviderSource =
@@ -133,6 +135,8 @@ export type QuotaWindow = {
   windowSeconds?: number;
   spentUsd?: number;
   limitUsd?: number;
+  /** Products a credit grant covers, as declared (credit grants only). */
+  appliesTo?: string[];
   /** Cycle-average pace relative to generatedAt. Not cached. */
   pace?: QuotaPace;
 };
@@ -183,6 +187,17 @@ export type ProviderQuota = {
     remaining?: number;
     unlimited?: boolean;
     unit?: "usd" | "credits";
+  };
+  /**
+   * Present when the values were declared by the operator rather than measured
+   * from a provider. Never cached.
+   */
+  declared?: {
+    basis: "declared";
+    asOf: string;
+    ageDays: number;
+    stale: boolean;
+    staleAfterDays: number;
   };
   state: {
     status: ProviderStatus;

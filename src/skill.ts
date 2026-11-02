@@ -25,6 +25,7 @@ export const HERMES_TAGS = [
   "grok",
   "kimi",
   "bigpickle",
+  "anthropic-api-credits",
   "cli",
 ];
 export const HERMES_CATEGORY = "observability";
@@ -125,6 +126,12 @@ or when comparing supported local provider headroom side by side.
    Grok also reads that same Pi auth file for an independent \`xai\` OAuth or literal API-key
    entry and treats Grok as usable when either the Grok CLI session or Pi \`xai\` credential is
    valid.
+10. \`anthropic_api\` is the Anthropic API credit balance (Agent SDK, API, Batch API, Playground,
+   Managed Agents), separate from the \`claude\` subscription windows and never part of its
+   headroom. Anthropic documents no balance endpoint, so quota-axi reads grants you declared in
+   \`credits\` in \`~/.config/quota-axi/config.json\` (\`$QUOTA_AXI_CONFIG\` overrides). Values are
+   declared, not measured: read \`declared.asOf\` and \`declared.stale\` (older than 7 days) before
+   trusting them. Expired grants drop out and runway follows the earliest-expiring grant.
 
 ## Usage
 

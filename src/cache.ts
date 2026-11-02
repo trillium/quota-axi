@@ -112,6 +112,8 @@ function readCacheProviders(): ProviderQuota[] {
 function toCacheProvider(provider: ProviderQuota): ProviderQuota | undefined {
   if (provider.state.status !== "fresh" || provider.windows.length === 0)
     return undefined;
+  // Declared config values are re-read every run and must not outlive edits.
+  if (provider.declared) return undefined;
   return normalizeCachedProvider({
     provider: provider.provider,
     label: provider.label,

@@ -152,6 +152,26 @@ export function renderQuotaToon(
     blocks.push(encode({ attempts }));
   }
 
+  const credits = response.providers.flatMap((provider) =>
+    provider.declared
+      ? provider.windows.map((window) => ({
+          provider: provider.provider,
+          grant: window.id,
+          remainingUsd:
+            window.limitUsd !== undefined && window.spentUsd !== undefined
+              ? Math.round((window.limitUsd - window.spentUsd) * 100) / 100
+              : ("unknown" as const),
+          totalUsd: window.limitUsd ?? ("unknown" as const),
+          appliesTo: window.appliesTo?.join(" + ") || "unknown",
+          expiresAt: window.resetsAt ?? "unknown",
+          basis: provider.declared?.basis,
+          asOf: provider.declared?.asOf,
+          stale: provider.declared?.stale,
+        }))
+      : [],
+  );
+  if (credits.length > 0) blocks.push(encode({ credits }));
+
   blocks.push(renderHelp(quotaHelpLines(response)));
   return blocks.filter(Boolean).join("\n");
 }
