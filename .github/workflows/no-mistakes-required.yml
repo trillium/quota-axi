@@ -45,7 +45,9 @@ jobs:
     # These stay job-level rather than moving to the action's `exempt-authors`
     # input on purpose: an in-job exemption still requires the run to start, and
     # a GITHUB_TOKEN PR's run is created in action_required and never starts.
+    # The fork ships direct PRs, so the gate only runs on the upstream repo.
     if: >-
+      github.repository == 'kunchenguid/quota-axi' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
