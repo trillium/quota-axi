@@ -139,7 +139,13 @@ describe("models command", () => {
   });
 
   it("fails when every catalog provider fails and rejects non-catalog scopes", async () => {
-    for (const provider of ["claude", "codex", "grok", "kimi"] as const) {
+    for (const provider of [
+      "claude",
+      "codex",
+      "grok",
+      "kimi",
+      "opencode-go",
+    ] as const) {
       PROVIDERS[provider] = adapter(failedQuota(provider));
     }
     PROVIDERS.cursor = adapter({
@@ -151,7 +157,7 @@ describe("models command", () => {
     });
 
     const json = JSON.parse(await capture(["models", "--json"]));
-    expect(json.models).toHaveLength(12);
+    expect(json.models).toHaveLength(20);
     expect(process.exitCode).toBe(1);
 
     process.exitCode = undefined;

@@ -24,6 +24,8 @@ export const HERMES_TAGS = [
   "copilot",
   "grok",
   "kimi",
+  "github",
+  "opencode-go",
   "cli",
 ];
 export const HERMES_CATEGORY = "observability";

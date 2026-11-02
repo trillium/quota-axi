@@ -73,6 +73,8 @@ const ACCENTS: Record<ProviderId, StyleSpec> = {
   copilot: { rgb: [116, 199, 236], ansi16: "94", bold: true },
   grok: { rgb: [180, 190, 254], ansi16: "95", bold: true },
   kimi: { rgb: [245, 194, 231], ansi16: "95", bold: true },
+  github: { rgb: [88, 166, 255], ansi16: "33", bold: true },
+  "opencode-go": { rgb: [203, 166, 247], ansi16: "95", bold: true },
 };
 
 const STYLES: Record<Exclude<StyleName, `accent:${ProviderId}`>, StyleSpec> = {
@@ -484,7 +486,7 @@ export function shortWindowLabel(window: QuotaWindow): string {
   const tokens = window.label.split(/[\s_]+/).filter(Boolean);
   if (
     tokens.length > 1 &&
-    /^(week|window|day|month|session|usage|quota)$/i.test(
+    /^(week|window|day|month|session|usage|quota|api)$/i.test(
       tokens[tokens.length - 1],
     )
   ) {

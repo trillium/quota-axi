@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-08-10 — session c0690942
+
+Files: src/types.ts, src/providers/github.ts, src/providers/index.ts, src/tui.ts, src/interpretation.ts
 ## [0.1.20](https://github.com/kunchenguid/quota-axi/compare/quota-axi-v0.1.19...quota-axi-v0.1.20) (2026-08-08)
 
 

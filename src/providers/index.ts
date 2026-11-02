@@ -4,6 +4,8 @@ import { copilotAdapter } from "./copilot.js";
 import { cursorAdapter } from "./cursor.js";
 import { grokAdapter } from "./grok.js";
 import { kimiAdapter } from "./kimi.js";
+import { githubAdapter } from "./github.js";
+import { opencodeGoAdapter } from "./opencode-go.js";
 import {
   PROVIDER_IDS,
   type ProviderAdapter,
@@ -17,6 +19,8 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   copilot: copilotAdapter,
   grok: grokAdapter,
   kimi: kimiAdapter,
+  github: githubAdapter,
+  "opencode-go": opencodeGoAdapter,
 };
 
 export function parseProviders(value: string | undefined): ProviderId[] {

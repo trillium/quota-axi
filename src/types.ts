@@ -4,7 +4,9 @@ export type ProviderId =
   | "cursor"
   | "copilot"
   | "grok"
-  | "kimi";
+  | "kimi"
+  | "github"
+  | "opencode-go";
 
 export const PROVIDER_IDS = [
   "claude",
@@ -13,6 +15,8 @@ export const PROVIDER_IDS = [
   "copilot",
   "grok",
   "kimi",
+  "github",
+  "opencode-go",
 ] as const satisfies readonly ProviderId[];
 
 export type ProviderSource =
@@ -237,7 +241,7 @@ export type IntelligenceBucket = "high" | "medium" | "low";
 
 /** Native-provider model knowledge used by the `models` evidence join. */
 export type ModelCatalogEntry = {
-  provider: "claude" | "codex" | "grok" | "kimi";
+  provider: "claude" | "codex" | "grok" | "kimi" | "opencode-go";
   id: string;
   label: string;
   intelligence: IntelligenceBucket;
