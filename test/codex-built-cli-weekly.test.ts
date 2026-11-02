@@ -43,7 +43,12 @@ process.stdin.on("data", (chunk) => {
     if (!line.trim()) continue;
     const request = JSON.parse(line);
     let result = {};
-    if (request.method === "account/read") result = { account: null };
+    if (request.method === "account/read") {
+      result = {
+        account: { type: "chatgpt", email: "cli@example.invalid", planType: "plus" },
+        requiresOpenaiAuth: true
+      };
+    }
     if (request.method === "account/rateLimits/read") {
       result = {
         rateLimits: {
@@ -63,9 +68,8 @@ process.stdin.on("data", (chunk) => {
     );
     chmodSync(codex, 0o700);
 
-    const run = (json: boolean) => {
-      const args = [BUILT_CLI_ENTRYPOINT, "--provider", "codex"];
-      if (json) args.push("--json");
+    const run = (...flags: string[]) => {
+      const args = [BUILT_CLI_ENTRYPOINT, "--provider", "codex", ...flags];
       const result = spawnSync(process.execPath, args, {
         encoding: "utf8",
         timeout: 10_000,
@@ -82,11 +86,14 @@ process.stdin.on("data", (chunk) => {
       return result.stdout;
     };
 
-    const toon = run(false);
+    expect(run()).toContain("codex,all_models,100");
+
+    // Window identity lives in the `--full` audit tier.
+    const toon = run("--full");
     expect(toon).toContain("codex,weekly,week,100");
     expect(toon).not.toContain("codex,five_hour,session");
 
-    const json = JSON.parse(run(true)) as QuotaAxiResponse;
+    const json = JSON.parse(run("--json", "--full")) as QuotaAxiResponse;
     expect(json.providers[0]).toMatchObject({
       provider: "codex",
       source: "cli-rpc",

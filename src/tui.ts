@@ -1,3 +1,9 @@
+import {
+  providerPresence,
+  type ProviderPresence,
+} from "./lib/source-attempts.js";
+import { collapseHome } from "./lib/fs.js";
+import { isUsageFetchFailure } from "./providers/usage-fetch-failure.js";
 import type {
   EffectiveAvailability,
   ProviderId,
@@ -10,27 +16,65 @@ import type {
  * Human terminal report ("Direction D'"): a two-up card grid with thin
  * headroom bars and a linear-pace marker wherever pace is known. This surface is
  * presentation only - it renders the same redacted response the TOON and JSON
- * surfaces receive and derives nothing new from providers or the cache.
+ * surfaces receive, grouped by the caller's presence classification, and
+ * derives nothing new from providers or the cache. Providers with nothing set
+ * up fold into one footer line unless the caller asks to draw them in full.
  */
 
 export type TuiColorDepth = "none" | "16" | "256" | "truecolor";
+
+/**
+ * Which side of each window the human report draws: what is left (the
+ * canonical `percentRemaining` direction, the default) or what has been
+ * consumed. It is a display preference only - the model, cache, TOON, and
+ * JSON keep the canonical direction whatever it is set to.
+ */
+export type TuiShow = "remaining" | "used";
+/** A resolved palette: `dark` is Catppuccin Mocha, `light` is Catppuccin Latte. */
+export type TuiTheme = "dark" | "light";
+export type TuiThemeSetting = TuiTheme | "system";
+export const TUI_THEME_SETTINGS: readonly TuiThemeSetting[] = [
+  "light",
+  "dark",
+  "system",
+];
 
 export type TuiOptions = {
   /** Raw terminal width; clamped to [80, 120], defaults to 100. */
   columns?: number;
   colorDepth?: TuiColorDepth;
+  /** Truecolor/256 palette; defaults to `dark`. The ANSI-16 path is theme-free. */
+  theme?: TuiTheme;
   /** Mirrors `--full`: appends account identity and source-attempt footers. */
   full?: boolean;
   /** IANA time zone for header/absolute times; defaults to the system zone. */
   timeZone?: string;
-  /** Dim closing line used by the live report for its key hint. */
-  footerHint?: string;
   /**
-   * Mirrors `--active-only`: render only providers with an active subscription
-   * (fresh/stale live cards), hiding signed-out and failed providers. Default
-   * off; the header still reports how many were hidden.
+   * Each provider's presence, aligned with `response.providers`. The caller
+   * derives it from the unredacted source attempts, which a redacted response
+   * no longer carries. Left out, each provider is classified from what it
+   * still holds, so a provider without attempts never folds.
+   */
+  presence?: readonly ProviderPresence[];
+  /**
+   * Draw providers that are not set up as full cards instead of folding them
+   * into one footer line (`a` in the live report, `--all`, or `--provider`).
+   */
+  showNotSetUp?: boolean;
+  /** Draw percentages and bars as what is left (default) or what is used. */
+  show?: TuiShow;
+  /**
+   * Mirrors `--active-only`: render only providers with a reading (live and
+   * stale cards), hiding signed-out, failed, and not-set-up providers. Default
+   * off; the header reports how many were hidden.
    */
   activeOnly?: boolean;
+  /**
+   * Each provider's human lane name from `tui.accountLabels`, aligned with
+   * `response.providers`. The caller resolves it from the account key or the
+   * unredacted `accountLocator`, which a redacted response no longer carries.
+   */
+  accountLabels?: readonly (string | undefined)[];
 };
 
 const CARD_WIDTH = 49;
@@ -38,6 +82,8 @@ const CARD_INTERIOR = CARD_WIDTH - 2;
 const CARD_GUTTER = 2;
 const TWO_COLUMN_MIN = CARD_WIDTH * 2 + CARD_GUTTER;
 const EFFECTIVE_BAR_WIDTH = 41;
+/** Keeps the longest provider id, a label, and the title's right side on one card row. */
+const ACCOUNT_LABEL_WIDTH = 20;
 /** 3 gutter + 8 label + bar + 1 + 4 percent + 2 + 6 reset + 1 = CARD_INTERIOR. */
 const WINDOW_BAR_WIDTH = CARD_INTERIOR - 25;
 const MIN_COLUMNS = 80;
@@ -72,33 +118,104 @@ type StyleSpec = {
   bold?: boolean;
 };
 
-const ACCENTS: Record<ProviderId, StyleSpec> = {
-  claude: { rgb: [250, 179, 135], ansi16: "93", bold: true },
-  codex: { rgb: [148, 226, 213], ansi16: "96", bold: true },
-  cursor: { rgb: [137, 180, 250], ansi16: "94", bold: true },
-  copilot: { rgb: [116, 199, 236], ansi16: "94", bold: true },
-  grok: { rgb: [180, 190, 254], ansi16: "95", bold: true },
-  kimi: { rgb: [245, 194, 231], ansi16: "95", bold: true },
-  bigpickle: { rgb: [166, 227, 161], ansi16: "92", bold: true },
-  anthropic_api: { rgb: [235, 160, 172], ansi16: "91", bold: true },
+type Palette = {
+  accents: Record<ProviderId, StyleSpec>;
+  styles: Record<Exclude<StyleName, `accent:${ProviderId}`>, StyleSpec>;
 };
 
-const STYLES: Record<Exclude<StyleName, `accent:${ProviderId}`>, StyleSpec> = {
-  dim: { rgb: [127, 132, 156], ansi16: "90" },
-  dimmer: { rgb: [88, 91, 112], ansi16: "90" },
-  dimBold: { rgb: [127, 132, 156], ansi16: "90", bold: true },
-  label: { rgb: [166, 173, 200], ansi16: "37" },
-  ok: { rgb: [166, 227, 161], ansi16: "32" },
-  okBold: { rgb: [166, 227, 161], ansi16: "32", bold: true },
-  warn: { rgb: [249, 226, 175], ansi16: "33" },
-  warnBold: { rgb: [249, 226, 175], ansi16: "33", bold: true },
-  crit: { rgb: [243, 139, 168], ansi16: "31" },
-  critBold: { rgb: [243, 139, 168], ansi16: "31", bold: true },
-  marker: { rgb: [137, 220, 235], ansi16: "96" },
-  track: { rgb: [69, 71, 90], ansi16: "90" },
-  border: { rgb: [88, 91, 112], ansi16: "90" },
-  borderDim: { rgb: [49, 50, 68], ansi16: "90" },
+/** Catppuccin Mocha, the dark-background palette. */
+const MOCHA: Palette = {
+  accents: {
+    claude: { rgb: [250, 179, 135], ansi16: "93", bold: true },
+    codex: { rgb: [148, 226, 213], ansi16: "96", bold: true },
+    cursor: { rgb: [137, 180, 250], ansi16: "94", bold: true },
+    copilot: { rgb: [116, 199, 236], ansi16: "94", bold: true },
+    grok: { rgb: [180, 190, 254], ansi16: "95", bold: true },
+    kimi: { rgb: [245, 194, 231], ansi16: "95", bold: true },
+    zai: { rgb: [129, 216, 209], ansi16: "96", bold: true },
+    agy: { rgb: [232, 184, 109], ansi16: "93", bold: true },
+    alibaba: { rgb: [255, 155, 120], ansi16: "91", bold: true },
+    "opencode-go": { rgb: [160, 210, 255], ansi16: "96", bold: true },
+    commandcode: { rgb: [110, 210, 168], ansi16: "92", bold: true },
+    minimax: { rgb: [255, 196, 112], ansi16: "93", bold: true },
+    mimo: { rgb: [174, 214, 241], ansi16: "96", bold: true },
+    deepseek: { rgb: [88, 160, 242], ansi16: "94", bold: true },
+    openrouter: { rgb: [183, 148, 232], ansi16: "95", bold: true },
+    elevenlabs: { rgb: [214, 170, 255], ansi16: "95", bold: true },
+    devin: { rgb: [126, 196, 224], ansi16: "96", bold: true },
+    muse: { rgb: [0, 132, 255], ansi16: "94", bold: true },
+    higgsfield: { rgb: [255, 176, 122], ansi16: "93", bold: true },
+    bigpickle: { rgb: [166, 227, 161], ansi16: "92", bold: true },
+    anthropic_api: { rgb: [235, 160, 172], ansi16: "91", bold: true },
+  },
+  styles: {
+    dim: { rgb: [127, 132, 156], ansi16: "90" },
+    dimmer: { rgb: [88, 91, 112], ansi16: "90" },
+    dimBold: { rgb: [127, 132, 156], ansi16: "90", bold: true },
+    label: { rgb: [166, 173, 200], ansi16: "37" },
+    ok: { rgb: [166, 227, 161], ansi16: "32" },
+    okBold: { rgb: [166, 227, 161], ansi16: "32", bold: true },
+    warn: { rgb: [249, 226, 175], ansi16: "33" },
+    warnBold: { rgb: [249, 226, 175], ansi16: "33", bold: true },
+    crit: { rgb: [243, 139, 168], ansi16: "31" },
+    critBold: { rgb: [243, 139, 168], ansi16: "31", bold: true },
+    marker: { rgb: [137, 220, 235], ansi16: "96" },
+    track: { rgb: [69, 71, 90], ansi16: "90" },
+    border: { rgb: [88, 91, 112], ansi16: "90" },
+    borderDim: { rgb: [49, 50, 68], ansi16: "2;90" },
+  },
 };
+
+/**
+ * Catppuccin Latte, the light-background counterpart. Same style names and
+ * semantic mapping as Mocha, on Latte hues, darkened where stock Latte falls
+ * under 3:1 WCAG contrast against Latte base (#eff1f5) for text or 1.5:1 for
+ * track/border fills, and separated where two accents would share one
+ * 256-color cell. `ansi16` codes are shared: the 16-color path defers to the
+ * terminal's own palette.
+ */
+const LATTE: Palette = {
+  accents: {
+    ...MOCHA.accents,
+    claude: { rgb: [228, 82, 0], ansi16: "93", bold: true },
+    codex: { rgb: [23, 146, 153], ansi16: "96", bold: true },
+    cursor: { rgb: [30, 102, 245], ansi16: "94", bold: true },
+    copilot: { rgb: [16, 128, 150], ansi16: "94", bold: true },
+    grok: { rgb: [92, 106, 240], ansi16: "95", bold: true },
+    kimi: { rgb: [206, 60, 170], ansi16: "95", bold: true },
+    zai: { rgb: [0, 130, 110], ansi16: "96", bold: true },
+    agy: { rgb: [190, 120, 10], ansi16: "93", bold: true },
+    alibaba: { rgb: [215, 70, 70], ansi16: "91", bold: true },
+    "opencode-go": { rgb: [40, 120, 220], ansi16: "96", bold: true },
+    commandcode: { rgb: [52, 150, 30], ansi16: "92", bold: true },
+    minimax: { rgb: [215, 70, 0], ansi16: "93", bold: true },
+    mimo: { rgb: [4, 140, 190], ansi16: "96", bold: true },
+    deepseek: { rgb: [40, 110, 220], ansi16: "94", bold: true },
+    openrouter: { rgb: [136, 57, 239], ansi16: "95", bold: true },
+    elevenlabs: { rgb: [190, 70, 165], ansi16: "95", bold: true },
+    devin: { rgb: [20, 130, 160], ansi16: "96", bold: true },
+    muse: { rgb: [90, 80, 210], ansi16: "94", bold: true },
+    higgsfield: { rgb: [200, 80, 20], ansi16: "93", bold: true },
+  },
+  styles: {
+    dim: { rgb: [124, 127, 147], ansi16: "90" },
+    dimmer: { rgb: [132, 136, 154], ansi16: "90" },
+    dimBold: { rgb: [124, 127, 147], ansi16: "90", bold: true },
+    label: { rgb: [108, 111, 133], ansi16: "37" },
+    ok: { rgb: [52, 150, 30], ansi16: "32" },
+    okBold: { rgb: [52, 150, 30], ansi16: "32", bold: true },
+    warn: { rgb: [188, 108, 0], ansi16: "33" },
+    warnBold: { rgb: [188, 108, 0], ansi16: "33", bold: true },
+    crit: { rgb: [200, 8, 50], ansi16: "31" },
+    critBold: { rgb: [200, 8, 50], ansi16: "31", bold: true },
+    marker: { rgb: [0, 128, 190], ansi16: "96" },
+    track: { rgb: [188, 192, 204], ansi16: "90" },
+    border: { rgb: [172, 176, 190], ansi16: "90" },
+    borderDim: { rgb: [192, 196, 208], ansi16: "2;90" },
+  },
+};
+
+const PALETTES: Record<TuiTheme, Palette> = { dark: MOCHA, light: LATTE };
 
 /**
  * Resolve the color depth for the TUI report from the environment. Honors
@@ -127,127 +244,367 @@ export function renderQuotaTui(
   response: QuotaAxiResponse,
   options: TuiOptions = {},
 ): string {
-  const columns = Math.min(
-    MAX_COLUMNS,
-    Math.max(MIN_COLUMNS, options.columns ?? TWO_COLUMN_MIN),
-  );
+  const columns = resolveColumns(options.columns);
   const twoColumn = columns >= TWO_COLUMN_MIN;
   const generatedAtMs = Date.parse(response.generatedAt);
   const timeZone = options.timeZone;
+  const show = options.show ?? "remaining";
 
+  const tiers: Record<ProviderPresence, ProviderQuota[]> = {
+    live: [],
+    stale: [],
+    attention: [],
+    absent: [],
+  };
+  const labels = new Map<ProviderQuota, string>();
+  response.providers.forEach((provider, index) => {
+    tiers[options.presence?.[index] ?? providerPresence(provider)].push(
+      provider,
+    );
+    const label = fittedAccountLabel(options.accountLabels?.[index]);
+    if (label) labels.set(provider, label);
+  });
+  const { live, stale, attention, absent } = tiers;
   const activeOnly = options.activeOnly ?? false;
-  const ordered = activeOnly
-    ? response.providers.filter(isLive)
-    : [
-        ...response.providers.filter(isLive),
-        ...response.providers.filter((provider) => !isLive(provider)),
-      ];
-  const cards = ordered.map((provider) => buildCard(provider, generatedAtMs));
+  const carded = activeOnly
+    ? [...live, ...stale]
+    : [...live, ...stale, ...attention];
+  const labelOf = (provider: ProviderQuota): string | undefined =>
+    labels.get(provider);
+  const card = (provider: ProviderQuota): Card =>
+    buildCard(provider, labelOf(provider), generatedAtMs, show);
 
   const lines: Line[] = [];
   lines.push([
-    { text: `  ${headerText(response, activeOnly, timeZone)}`, style: "dim" },
+    {
+      text: `  ${headerText(response, tiers, columns - 2, activeOnly, timeZone)}`,
+      style: "dim",
+    },
   ]);
   lines.push([]);
-  if (activeOnly && ordered.length === 0) {
+  if (activeOnly && carded.length === 0) {
     lines.push([
       { text: "  no providers with active subscriptions", style: "dim" },
     ]);
-  } else {
-    lines.push(...layoutCards(cards, twoColumn));
+  } else if (carded.length > 0) {
+    lines.push(...layoutCards(carded.map(card), twoColumn));
+  }
+  if (!activeOnly && absent.length > 0) {
+    if (lines.length > 2) lines.push([]);
+    if (options.showNotSetUp) {
+      lines.push([
+        { text: "  ○ not set up", style: "dimBold" },
+        { text: ` · ${absent.length}`, style: "dim" },
+      ]);
+      lines.push([]);
+      lines.push(...layoutCards(absent.map(card), twoColumn));
+    } else {
+      lines.push(...notSetUpFooter(absent, labelOf, columns));
+    }
   }
   if (options.full) {
     lines.push([]);
-    for (const provider of ordered) {
+    for (const provider of activeOnly ? carded : [...carded, ...absent]) {
       for (const footerLine of fullFooterLines(provider, columns - 2)) {
         lines.push([{ text: `  ${footerLine}`, style: "dim" }]);
       }
     }
   }
-  if (options.footerHint !== undefined) {
-    lines.push([]);
-    lines.push([
-      { text: `  ${truncate(options.footerHint, columns - 2)}`, style: "dim" },
-    ]);
-  }
-
   return lines
-    .map((line) => renderLine(trimRight(line), options.colorDepth ?? "none"))
+    .map((line) => renderLine(trimRight(line), renderStyle(options)))
     .join("\n");
 }
 
-function isLive(provider: ProviderQuota): boolean {
+/**
+ * Providers with nothing set up, folded into one dim line of names wrapped
+ * under a hanging indent, ending with where to look next. Every supported
+ * provider stays named, and the line grows by names, not by cards. A name too
+ * long for a line of its own - an account key on a narrow terminal - is
+ * truncated rather than allowed to run past the terminal, and a line is only
+ * wrapped once it carries a name, so the label never stands alone.
+ */
+function notSetUpFooter(
+  absent: ProviderQuota[],
+  labelOf: (provider: ProviderQuota) => string | undefined,
+  columns: number,
+): Line[] {
+  const label = "○ not set up  ";
+  const indent = 2 + displayWidth(label);
+  const width = columns - 2;
+  const lines: Line[] = [];
+  let current: Line = [{ text: "  " }, { text: label, style: "dimBold" }];
+  let used = indent;
+  const wrap = (): void => {
+    lines.push(current);
+    current = [{ text: " ".repeat(indent) }];
+    used = indent;
+  };
+  const append = (text: string, style: StyleName): void => {
+    const fitted = truncate(text, width - used);
+    if (!fitted) return;
+    current.push({ text: fitted, style });
+    used += displayWidth(fitted);
+  };
+  absent.forEach((provider, index) => {
+    const lane = labelOf(provider) ?? configuredAccountKey(provider);
+    const name = lane ? `${provider.provider}/${lane}` : provider.provider;
+    const separator = index === 0 ? "" : " · ";
+    if (
+      used > indent &&
+      used + displayWidth(separator) + displayWidth(name) > width
+    ) {
+      wrap();
+    } else if (separator) {
+      current.push({ text: separator, style: "dimmer" });
+      used += displayWidth(separator);
+    }
+    append(name, "dim");
+  });
+  const pointer = "quota-axi auth shows where each is read";
+  if (used + 3 + displayWidth(pointer) > width) {
+    if (used > indent) wrap();
+  } else {
+    current.push({ text: "   " });
+    used += 3;
+  }
+  append(pointer, "dimmer");
+  lines.push(current);
+  return lines;
+}
+
+/**
+ * The report's dim closing line, rendered on its own so the live viewport can
+ * pin it to the last row instead of letting it scroll away with the cards.
+ */
+export function renderTuiHintLine(
+  text: string,
+  options: TuiOptions = {},
+): string {
+  const columns = resolveColumns(options.columns);
+  const line: Line = [
+    { text: `  ${truncate(text, columns - 2)}`, style: "dim" },
+  ];
+  return renderLine(trimRight(line), renderStyle(options));
+}
+
+type RenderStyle = { depth: TuiColorDepth; theme: TuiTheme };
+
+function renderStyle(options: TuiOptions): RenderStyle {
+  return {
+    depth: options.colorDepth ?? "none",
+    theme: options.theme ?? "dark",
+  };
+}
+
+function resolveColumns(columns: number | undefined): number {
+  return Math.min(
+    MAX_COLUMNS,
+    Math.max(MIN_COLUMNS, columns ?? TWO_COLUMN_MIN),
+  );
+}
+
+function hasReading(provider: ProviderQuota): boolean {
   return provider.state.status === "fresh" || provider.state.status === "stale";
 }
 
+type CardBorder = "border" | "borderDim";
+
+/**
+ * The fleet summary, never wider than the report. Every tier count is
+ * required reading, so a header that does not fit gives up the timestamp -
+ * its time zone, then its date, then the clock - rather than a count.
+ */
 function headerText(
   response: QuotaAxiResponse,
+  tiers: Record<ProviderPresence, ProviderQuota[]>,
+  width: number,
   activeOnly: boolean,
   timeZone?: string,
 ): string {
-  const live = response.providers.filter(isLive).length;
-  const parts = [
-    "quota-axi",
-    formatHeaderTime(response.generatedAt, timeZone),
-    `${live} live`,
-  ];
-  if (activeOnly) {
-    // Filtered view hides non-live cards; report the hidden count instead of
-    // signed-out/unavailable breakdowns that would name cards that aren't shown.
-    const hidden = response.providers.length - live;
-    if (hidden > 0) parts.push(`${hidden} hidden`);
-    return parts.filter(Boolean).join(" · ");
-  }
-  const signedOut = response.providers.filter(
-    (provider) => provider.state.status === "auth_required",
-  ).length;
-  const failed = response.providers.length - live - signedOut;
-  parts.push(`${signedOut} signed out`);
-  if (failed > 0) parts.push(`${failed} unavailable`);
-  return parts.filter(Boolean).join(" · ");
+  const attention = tiers.attention.length;
+  const hidden = attention + tiers.absent.length;
+  // A filtered view reports the hidden count rather than tier counts that would
+  // name cards no longer on screen.
+  const counts = activeOnly
+    ? [
+        `${tiers.live.length} live`,
+        `${tiers.stale.length} stale`,
+        ...(hidden > 0 ? [`${hidden} hidden`] : []),
+      ]
+    : [
+        `${tiers.live.length} live`,
+        `${tiers.stale.length} stale`,
+        `${attention} ${attention === 1 ? "needs" : "need"} attention`,
+        `${tiers.absent.length} not set up`,
+      ];
+  const candidates = headerTimes(response.generatedAt, timeZone).map((time) =>
+    ["quota-axi", ...(time ? [time] : []), ...counts].join(" · "),
+  );
+  return (
+    candidates.find((line) => displayWidth(line) <= width) ??
+    candidates[candidates.length - 1]
+  );
 }
 
 type Card = Line[];
 
-function buildCard(provider: ProviderQuota, generatedAtMs: number): Card {
-  return isLive(provider)
-    ? buildLiveCard(provider, generatedAtMs)
-    : buildFailedCard(provider);
+function buildCard(
+  provider: ProviderQuota,
+  label: string | undefined,
+  generatedAtMs: number,
+  show: TuiShow,
+): Card {
+  const name = label ? `${provider.provider} · ${label}` : provider.provider;
+  return hasReading(provider)
+    ? buildLiveCard(provider, name, generatedAtMs, show)
+    : buildFailedCard(provider, name);
 }
 
-function buildLiveCard(provider: ProviderQuota, generatedAtMs: number): Card {
-  const stale = provider.state.stale;
+/**
+ * A lane label as the report draws it: terminal-safe, trimmed, and short
+ * enough that a card title still fits. A blank label names nothing.
+ */
+function fittedAccountLabel(label: string | undefined): string | undefined {
+  if (label === undefined) return undefined;
+  return truncate(label.trim(), ACCOUNT_LABEL_WIDTH).trim() || undefined;
+}
+
+/** How old a reused reading is, as the card title's `reused 42s` marker. */
+function reusedAge(
+  refreshedAt: string | undefined,
+  generatedAtMs: number,
+): string {
+  const seconds = Math.floor(
+    (generatedAtMs - Date.parse(refreshedAt ?? "")) / 1_000,
+  );
+  if (!Number.isFinite(seconds) || seconds < 0) return "reused";
+  return seconds < 120
+    ? `reused ${seconds}s`
+    : `reused ${Math.floor(seconds / 60)}m`;
+}
+
+function buildLiveCard(
+  provider: ProviderQuota,
+  name: string,
+  generatedAtMs: number,
+  show: TuiShow,
+): Card {
+  const stale = provider.state.status === "stale";
+  const border: CardBorder = stale ? "borderDim" : "border";
   const rightTitle = [
     provider.plan,
     provider.source,
     stale ? "stale" : undefined,
+    provider.state.reused
+      ? reusedAge(provider.state.refreshedAt, generatedAtMs)
+      : undefined,
   ]
     .filter((part): part is string => part !== undefined)
     .join(" · ");
   const lines: Line[] = [
     titleLine(
-      {
-        text: ` ● ${provider.provider} `,
-        style: `accent:${provider.provider}`,
-      },
+      stale
+        ? { text: ` ◐ ${name} `, style: "warnBold" }
+        : {
+            text: ` ● ${name} `,
+            style: `accent:${provider.provider}`,
+          },
       rightTitle,
-      "border",
+      border,
     ),
-    interior([], "border"),
+    ...accountCardLines(provider, border),
+    interior([], border),
   ];
 
   const headline = pickHeadlineAvailability(provider);
+  const creditsLine = creditsOnlyHeadline(provider, stale, border);
+  if (creditsLine) {
+    lines.push(...creditsLine);
+  } else if (hasWhollyUnknownWindowRelationships(provider)) {
+    lines.push(...windowsOnlyHeadline(stale, border));
+  } else {
+    lines.push(...effectiveHeadline(provider, headline, stale, show, border));
+  }
+
+  if (provider.windows.length > 0) {
+    lines.push(interior([], border));
+    for (const window of provider.windows) {
+      lines.push(
+        interior(
+          windowRow(window, generatedAtMs, provider.windows, show),
+          border,
+        ),
+      );
+    }
+  }
+
+  const jobs = provider.jobs;
+  if (jobs) {
+    lines.push(interior([], border));
+    for (const text of [
+      `   jobs sampled ${jobs.sampled} · completed ${jobs.completed}`,
+      `        failed ${jobs.failed} · other ${jobs.other}`,
+    ]) {
+      lines.push(interior([{ text, style: "dim" }], border));
+    }
+  }
+
+  for (const note of cardNotes(provider, generatedAtMs)) {
+    lines.push(
+      interior(
+        [{ text: `   ${truncate(note, CARD_INTERIOR - 4)}`, style: "dimmer" }],
+        border,
+      ),
+    );
+  }
+
+  lines.push(interior([], border));
+  lines.push(bottomLine(border));
+  return lines;
+}
+
+/**
+ * The standard effective-headroom block: the binding window's percentage, its
+ * runway verdict, and the effective bar. It also preserves the existing
+ * unknown fallback for zero-window and partially understood providers.
+ */
+function effectiveHeadline(
+  provider: ProviderQuota,
+  headline: EffectiveAvailability | undefined,
+  stale: boolean,
+  show: TuiShow,
+  border: CardBorder,
+): Line[] {
+  const lines: Line[] = [];
   const effectivePct = headline?.effectivePercentRemaining;
   const markerPct = effectiveMarkerPercent(provider, headline);
 
+  const verdict = runwayVerdict(headline);
+  const percentText =
+    effectivePct === undefined ? undefined : shownPercent(effectivePct, show);
+  // The remaining view has always read as bare headroom; the flipped view
+  // says so, because the same number would otherwise read the other way.
+  const direction = show === "used" ? "used · " : "";
+  const headlineLabelWidth = Math.max(
+    0,
+    EFFECTIVE_BAR_WIDTH -
+      lineWidth(verdict) -
+      1 -
+      displayWidth(percentText ?? "") -
+      1 -
+      displayWidth(direction),
+  );
   const left: Line =
-    effectivePct !== undefined
+    effectivePct !== undefined && percentText !== undefined
       ? [
           {
-            text: `${Math.round(effectivePct)}%`,
+            text: percentText,
             style: boldHealthStyle(effectivePct),
           },
-          { text: ` ${scopeLabel(headline?.scope)}`, style: "dim" },
+          {
+            text: ` ${direction}${headlineLabel(provider, headline, headlineLabelWidth)}`,
+            style: "dim",
+          },
         ]
       : [
           {
@@ -255,7 +612,6 @@ function buildLiveCard(provider: ProviderQuota, generatedAtMs: number): Card {
             style: "dim",
           },
         ];
-  const verdict = runwayVerdict(headline);
   lines.push(
     interior(
       [
@@ -263,51 +619,111 @@ function buildLiveCard(provider: ProviderQuota, generatedAtMs: number): Card {
         ...padBetween(left, verdict, EFFECTIVE_BAR_WIDTH),
         { text: "   " },
       ],
-      "border",
+      border,
     ),
   );
   lines.push(
     interior(
       [
         { text: "   " },
-        ...thinBar(effectivePct, markerPct, EFFECTIVE_BAR_WIDTH),
+        ...thinBar(effectivePct, markerPct, EFFECTIVE_BAR_WIDTH, show),
         { text: "   " },
       ],
-      "border",
+      border,
     ),
   );
-
-  if (provider.windows.length > 0) {
-    lines.push(interior([], "border"));
-    for (const window of provider.windows) {
-      lines.push(interior(windowRow(window, generatedAtMs), "border"));
-    }
-  }
-
-  for (const note of cardNotes(provider)) {
-    lines.push(
-      interior(
-        [{ text: `   ${truncate(note, CARD_INTERIOR - 4)}`, style: "dimmer" }],
-        "border",
-      ),
-    );
-  }
-
-  lines.push(interior([], "border"));
-  lines.push(bottomLine("border"));
   return lines;
 }
 
-function buildFailedCard(provider: ProviderQuota): Card {
+/**
+ * A windowless reading that reports a raw credit balance has no combined bound
+ * and no percentage to draw, so its card states the balance instead of an empty
+ * effective bar whose zero fill would read as a failure. The balance is shown
+ * exactly as the vendor reports it, never converted into a percentage.
+ */
+function creditsOnlyHeadline(
+  provider: ProviderQuota,
+  stale: boolean,
+  border: CardBorder,
+): Line[] | undefined {
+  if (provider.windows.length > 0) return undefined;
+  const credits = provider.credits;
+  if (!credits) return undefined;
+  const amount =
+    credits.unlimited === true
+      ? "unlimited"
+      : credits.remaining === undefined
+        ? undefined
+        : `${credits.remaining} ${credits.unit ?? "credits"} remaining`;
+  if (amount === undefined) return undefined;
+  return [
+    interior(
+      [
+        { text: "   " },
+        {
+          text: stale ? `stale · ${amount}` : amount,
+          style: "dimBold",
+        },
+      ],
+      border,
+    ),
+  ];
+}
+
+/**
+ * The headline block for a provider that reports real per-window usage but no
+ * combinable bound: quota-axi does not know whether those windows are
+ * independent or jointly bounding, so there is no combined
+ * effective percentage, pace, or runway to show. Rendering the empty effective
+ * bar there reads as a failure, so the block is replaced by a single line naming
+ * what the card actually is - the per-window rows below carry the real data.
+ */
+function hasWhollyUnknownWindowRelationships(provider: ProviderQuota): boolean {
+  const semantics = provider.quotaSemantics;
+  if (
+    provider.windows.length === 0 ||
+    semantics?.status !== "unknown" ||
+    semantics.unresolvedWindowIds === undefined
+  ) {
+    return false;
+  }
+  const unresolved = new Set(semantics.unresolvedWindowIds);
+  return provider.windows.every(({ id }) => unresolved.has(id));
+}
+
+function windowsOnlyHeadline(stale: boolean, border: CardBorder): Line[] {
+  const left: Line = [
+    {
+      text: stale ? "stale · per-window usage" : "per-window usage",
+      style: "dim",
+    },
+  ];
+  const right: Line = [{ text: "no combined bound", style: "dim" }];
+  // Without the effective bar under it, this line's right edge belongs with the
+  // window rows' reset column rather than the (absent) bar's end.
+  return [
+    interior(
+      [
+        { text: "   " },
+        ...padBetween(left, right, CARD_INTERIOR - 4),
+        { text: " " },
+      ],
+      border,
+    ),
+  ];
+}
+
+function buildFailedCard(provider: ProviderQuota, name: string): Card {
   const status = provider.state.status;
   const rightTitle =
     status === "auth_required" ? "signed out" : humanize(status);
   const lines: Line[] = [
     titleLine(
-      { text: ` ○ ${provider.provider} `, style: "dimBold" },
+      { text: ` ○ ${name} `, style: "dimBold" },
       rightTitle,
       "borderDim",
     ),
+    ...accountCardLines(provider, "borderDim"),
     interior([], "borderDim"),
   ];
   const message =
@@ -385,17 +801,28 @@ function interior(content: Line, borderStyle: StyleName): Line {
   ];
 }
 
-function windowRow(window: QuotaWindow, generatedAtMs: number): Line {
+function windowRow(
+  window: QuotaWindow,
+  generatedAtMs: number,
+  windows: QuotaWindow[],
+  show: TuiShow,
+): Line {
+  if (window.shareOf) {
+    return shareWindowRow(window, generatedAtMs, windows);
+  }
   const pct = window.percentRemaining;
   const marker = window.pace?.timeRemainingPercent;
   const reset = resetCountdown(window, generatedAtMs);
   return [
     { text: "   " },
     { text: padEndDisplay(shortWindowLabel(window), 8), style: "label" },
-    ...thinBar(pct, marker, WINDOW_BAR_WIDTH),
+    ...thinBar(pct, marker, WINDOW_BAR_WIDTH, show),
     { text: " " },
     {
-      text: (pct === undefined ? "?" : `${Math.round(pct)}%`).padStart(4),
+      text: (pct === undefined
+        ? "?"
+        : shownPercent(pct, show, window.percentUsed)
+      ).padStart(4),
       style: pct === undefined ? "dim" : healthStyle(pct),
     },
     { text: "  " },
@@ -405,21 +832,74 @@ function windowRow(window: QuotaWindow, generatedAtMs: number): Line {
 }
 
 /**
+ * A used-share has no own remaining, so the remaining bar and `?` would make
+ * it look unmeasured. Print the used percent of the parent instead.
+ */
+function shareWindowRow(
+  window: QuotaWindow,
+  generatedAtMs: number,
+  windows: QuotaWindow[],
+): Line {
+  const reset = resetCountdown(window, generatedAtMs);
+  const captionWidth = WINDOW_BAR_WIDTH + 1 + 4;
+  return [
+    { text: "   " },
+    { text: padEndDisplay(shortWindowLabel(window), 8), style: "label" },
+    {
+      text: padEndDisplay(
+        truncate(shareCaption(window, windows), captionWidth),
+        captionWidth,
+      ),
+      style: "label",
+    },
+    { text: "  " },
+    { text: padEndDisplay(reset, 6), style: "dim" },
+    { text: " " },
+  ];
+}
+
+function shareCaption(window: QuotaWindow, windows: QuotaWindow[]): string {
+  const parent = windows.find((candidate) => candidate.id === window.shareOf);
+  const parentLabel = parent
+    ? shortWindowLabel(parent)
+    : truncate(window.shareOf ?? "", 7);
+  if (window.percentUsed === undefined) return `share of ${parentLabel}`;
+  return `${Math.round(window.percentUsed)}% of ${parentLabel}`;
+}
+
+/**
+ * The percentage a row or headline prints. A window uses its raw consumed
+ * figure; an effective headline derives consumption from raw remaining.
+ */
+function shownPercent(
+  percentRemaining: number,
+  show: TuiShow,
+  percentUsed = 100 - percentRemaining,
+): string {
+  return `${Math.round(show === "used" ? percentUsed : percentRemaining)}%`;
+}
+
+/**
  * Quiet-Ledger thin bar with the linear-pace marker: fill is current
  * headroom at half-cell resolution, `┃` overwrites the cell at
  * `timeRemainingPercent` (the fill position of exactly linear burn), and the
- * marker is omitted when pace is unknown rather than faked.
+ * marker is omitted when pace is unknown rather than faked. The used view
+ * mirrors both: fill is consumption and the marker sits at the elapsed share
+ * of the window, so fill running past the marker means burning ahead of the
+ * reset clock. Color always follows headroom, whichever side is drawn.
  */
 export function thinBar(
   percentRemaining: number | undefined,
   markerPercent: number | undefined,
   width: number,
+  show: TuiShow = "remaining",
 ): Line {
   const fillStyle: StyleName =
     percentRemaining === undefined ? "track" : healthStyle(percentRemaining);
   let halfUnits = 0;
   if (percentRemaining !== undefined) {
-    const pct = Math.min(100, Math.max(0, percentRemaining));
+    const remaining = Math.min(100, Math.max(0, percentRemaining));
+    const pct = show === "used" ? 100 - remaining : remaining;
     halfUnits = Math.round((pct / 100) * width * 2);
     if (pct > 0 && halfUnits === 0) halfUnits = 1;
     if (pct < 100 && halfUnits === width * 2) halfUnits = width * 2 - 1;
@@ -432,9 +912,10 @@ export function thinBar(
     else cells.push({ text: "─", style: "track" });
   }
   if (markerPercent !== undefined && Number.isFinite(markerPercent)) {
+    const position = show === "used" ? 100 - markerPercent : markerPercent;
     const cell = Math.min(
       width - 1,
-      Math.max(0, Math.round((markerPercent / 100) * width)),
+      Math.max(0, Math.round((position / 100) * width)),
     );
     cells[cell] = { text: "┃", style: "marker" };
   }
@@ -459,8 +940,10 @@ function effectiveMarkerPercent(
   headline: EffectiveAvailability | undefined,
 ): number | undefined {
   if (!headline) return undefined;
-  const limitingId =
-    headline.runway?.limitingWindowId ?? headline.limitingWindowIds?.[0];
+  // The headline bar represents effective headroom, so its reset marker must
+  // follow that headroom's binding window. A finite runway can be constrained
+  // by another window and is rendered as the separate "empty in" verdict.
+  const limitingId = headline.limitingWindowIds?.[0];
   if (limitingId === undefined) return undefined;
   const limiting = provider.windows.find((window) => window.id === limitingId);
   return limiting?.pace?.timeRemainingPercent;
@@ -489,8 +972,32 @@ function runwayVerdict(headline: EffectiveAvailability | undefined): Line {
   return [{ text, style: "warnBold" }];
 }
 
-function cardNotes(provider: ProviderQuota): string[] {
+function staleAge(
+  refreshedAt: string | undefined,
+  generatedAtMs: number,
+): string {
+  const seconds = Math.floor(
+    (generatedAtMs - Date.parse(refreshedAt ?? "")) / 1_000,
+  );
+  if (!Number.isFinite(seconds) || seconds < 0) return "unknown";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${formatCountdown(seconds)} ago`;
+}
+
+function cardNotes(provider: ProviderQuota, generatedAtMs: number): string[] {
   const notes: string[] = [];
+  if (provider.state.status === "stale") {
+    notes.push(
+      `last refreshed ${staleAge(provider.state.refreshedAt, generatedAtMs)}`,
+    );
+    if (provider.state.error) {
+      const prefix = isUsageFetchFailure(provider) ? "fetch failed " : "";
+      notes.push(`${prefix}${humanize(provider.state.error)}`);
+    }
+    if (provider.state.reason) {
+      notes.push(`reason ${humanize(provider.state.reason)}`);
+    }
+  }
   if (provider.state.retryAfter) {
     notes.push(`retry after ${provider.state.retryAfter}`);
   }
@@ -514,6 +1021,66 @@ function cardNotes(provider: ProviderQuota): string[] {
 function scopeLabel(scope: string | undefined): string {
   if (scope === undefined) return "unknown scope";
   return humanize(scope.replace(/^all_/, "all "));
+}
+
+/** Budget for the headline window name, leaving room for the runway verdict. */
+const HEADLINE_LABEL_WIDTH = 20;
+
+/**
+ * Name the window the headline percent actually is. Effective remaining is the
+ * minimum across the bounded windows, so it always equals one named window's
+ * `percentRemaining` - `limitingWindowIds` is exactly that window (or the tied
+ * set), and its provider label ("week", "session", "credits") is what the
+ * headline bar is showing. Falls back to the model-scope wording when any
+ * limiting window is unresolvable; a model-scoped headline keeps the scope as
+ * a suffix so "week · fable" stays unambiguous.
+ */
+export function headlineLabel(
+  provider: ProviderQuota,
+  headline: EffectiveAvailability | undefined,
+  width = HEADLINE_LABEL_WIDTH,
+): string {
+  const ids = headline?.limitingWindowIds ?? [];
+  const names = ids
+    .map((id) => provider.windows.find((window) => window.id === id)?.label)
+    .map((label) =>
+      label === undefined
+        ? undefined
+        : sanitizeTerminalText(label).toLowerCase(),
+    )
+    .filter((label): label is string => label !== undefined && label !== "");
+  const scope = headline?.scope;
+  if (names.length === 0 || names.length !== ids.length) {
+    return truncate(scopeLabel(scope), width);
+  }
+  const suffix =
+    scope !== undefined && !scope.startsWith("all_")
+      ? ` · ${humanize(scope.replace(/^(?:model|product):/, "")).toLowerCase()}`
+      : "";
+  const joined = names.join(" + ");
+  let windowLabel = joined;
+  if (displayWidth(joined) > width) {
+    const tie = names.length > 1 ? ` +${names.length - 1}` : "";
+    windowLabel = `${compactHeadlineWindowName(
+      names[0],
+      width - displayWidth(tie),
+    )}${tie}`;
+  }
+  return displayWidth(`${windowLabel}${suffix}`) <= width
+    ? `${windowLabel}${suffix}`
+    : windowLabel;
+}
+
+function compactHeadlineWindowName(label: string, width: number): string {
+  const safeLabel = sanitizeTerminalText(label);
+  if (displayWidth(safeLabel) <= width) return safeLabel;
+  const parts = safeLabel.match(/^(.*\S)\s+(\S+)$/u);
+  if (parts === null) return truncate(safeLabel, width);
+  const period = parts[2];
+  const separatorWidth = 1;
+  const prefixWidth = width - displayWidth(period) - separatorWidth;
+  if (prefixWidth <= 0) return truncate(period, width);
+  return `${truncate(parts[1], prefixWidth)} ${period}`;
 }
 
 /**
@@ -567,9 +1134,9 @@ export function formatCountdown(seconds: number): string {
   return minutes > 0 ? `${minutes}m` : "<1m";
 }
 
-function formatHeaderTime(iso: string, timeZone?: string): string {
+function headerTimes(iso: string, timeZone?: string): string[] {
   const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return iso;
+  if (!Number.isFinite(ms)) return [iso, ""];
   const parts = new Intl.DateTimeFormat("en-US", {
     ...(timeZone ? { timeZone } : {}),
     year: "numeric",
@@ -583,12 +1150,25 @@ function formatHeaderTime(iso: string, timeZone?: string): string {
   const get = (type: string): string =>
     parts.find((part) => part.type === type)?.value ?? "";
   const hour = get("hour") === "24" ? "00" : get("hour");
-  return `${get("year")}-${get("month")}-${get("day")} ${hour}:${get("minute")} ${get("timeZoneName")}`.trim();
+  const date = `${get("year")}-${get("month")}-${get("day")}`;
+  const clock = `${hour}:${get("minute")}`;
+  return [
+    `${date} ${clock} ${get("timeZoneName")}`.trim(),
+    `${date} ${clock}`,
+    clock,
+    "",
+  ];
 }
 
 function fullFooterLines(provider: ProviderQuota, width: number): string[] {
-  const accountParts: string[] = [provider.provider];
+  const accountKey = configuredAccountKey(provider);
+  const accountParts: string[] = [
+    provider.provider,
+    ...(accountKey ? [accountKey] : []),
+  ];
   const protectedAccountParts = new Set([0]);
+  if (provider.accountLocator)
+    accountParts.push(collapseHome(provider.accountLocator.path));
   if (provider.account?.email) accountParts.push(provider.account.email);
   if (provider.account?.organization) {
     accountParts.push(provider.account.organization);
@@ -604,7 +1184,8 @@ function fullFooterLines(provider: ProviderQuota, width: number): string[] {
     (attempt) =>
       `${attempt.source} (${attempt.status}${attempt.error ? `: ${attempt.error}` : ""})`,
   );
-  const tried = attempts.length > 0 ? attempts : provider.state.sourcesTried;
+  const tried =
+    attempts.length > 0 ? attempts : (provider.state.sourcesTried ?? []);
   const completeParts = [...accountParts];
   if (tried.length > 0) completeParts.push(`tried ${tried.join(" → ")}`);
   const complete = completeParts.join(" · ");
@@ -617,7 +1198,7 @@ function fullFooterLines(provider: ProviderQuota, width: number): string[] {
     );
   } else {
     lines.push(
-      ...provider.state.sourcesTried.map((source) =>
+      ...(provider.state.sourcesTried ?? []).map((source) =>
         truncate(`  tried ${source}`, width),
       ),
     );
@@ -732,11 +1313,13 @@ function padCardToHeight(card: Card, height: number): Card {
   const missing = height - card.length;
   if (missing <= 0) return card;
   const bottom = card.at(-1);
-  const interiorLine = card[1];
-  if (!bottom || !interiorLine) return card;
+  // Row 1 carries content on account cards, so pad with a blank interior in
+  // the card's own border style rather than copying that row.
+  const borderStyle = card[1]?.[0]?.style;
+  if (!bottom || !borderStyle) return card;
   return [
     ...card.slice(0, -1),
-    ...Array.from({ length: missing }, () => [...interiorLine]),
+    ...Array.from({ length: missing }, () => interior([], borderStyle)),
     bottom,
   ];
 }
@@ -753,6 +1336,36 @@ function boldHealthStyle(pct: number): "okBold" | "warnBold" | "critBold" {
 
 function humanize(text: string): string {
   return text.replace(/_/g, " ");
+}
+
+/**
+ * The account key only when it names an account the user configured. An
+ * expanded report fills `default` on every provider that selected one account,
+ * which is a schema artefact rather than something to show a human.
+ */
+function configuredAccountKey(provider: ProviderQuota): string | undefined {
+  return provider.accountKey && provider.accountKey !== "default"
+    ? provider.accountKey
+    : undefined;
+}
+
+function accountCardLines(
+  provider: ProviderQuota,
+  border: "border" | "borderDim",
+): Line[] {
+  const accountKey = configuredAccountKey(provider);
+  if (!accountKey) return [];
+  return [
+    interior(
+      [
+        {
+          text: truncate(`   account ${accountKey}`, CARD_INTERIOR),
+          style: "dim",
+        },
+      ],
+      border,
+    ),
+  ];
 }
 
 function truncate(text: string, width: number): string {
@@ -821,11 +1434,11 @@ function displayWidth(text: string): number {
   return width;
 }
 
-function terminalTextUnits(text: string): string[] {
+export function terminalTextUnits(text: string): string[] {
   return [...GRAPHEME_SEGMENTER.segment(text)].map((part) => part.segment);
 }
 
-function sanitizeTerminalText(text: string): string {
+export function sanitizeTerminalText(text: string): string {
   let result = "";
   for (const character of text) {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -838,7 +1451,7 @@ function sanitizeTerminalText(text: string): string {
   return result;
 }
 
-function terminalUnitWidth(unit: string): number {
+export function terminalUnitWidth(unit: string): number {
   if (
     /\p{Emoji_Presentation}/u.test(unit) ||
     (/\p{Emoji}/u.test(unit) &&
@@ -906,23 +1519,28 @@ function trimRight(line: Line): Line {
   return out;
 }
 
-function renderLine(line: Line, depth: TuiColorDepth): string {
+function renderLine(line: Line, { depth, theme }: RenderStyle): string {
   if (depth === "none") {
     return line.map((segment) => segment.text).join("");
   }
   return line
     .map((segment) => {
       if (segment.style === undefined) return segment.text;
-      const sgr = styleSgr(segment.style, depth);
+      const sgr = styleSgr(segment.style, depth, theme);
       return sgr === "" ? segment.text : `\x1b[${sgr}m${segment.text}\x1b[0m`;
     })
     .join("");
 }
 
-function styleSgr(style: StyleName, depth: TuiColorDepth): string {
+function styleSgr(
+  style: StyleName,
+  depth: TuiColorDepth,
+  theme: TuiTheme,
+): string {
+  const palette = PALETTES[theme];
   const spec = style.startsWith("accent:")
-    ? ACCENTS[style.slice("accent:".length) as ProviderId]
-    : STYLES[style as Exclude<StyleName, `accent:${ProviderId}`>];
+    ? palette.accents[style.slice("accent:".length) as ProviderId]
+    : palette.styles[style as Exclude<StyleName, `accent:${ProviderId}`>];
   const codes: string[] = [];
   if (spec.bold) codes.push("1");
   if (depth === "truecolor") {

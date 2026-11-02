@@ -1,26 +1,32 @@
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
+# No paths / paths-ignore filter here, deliberately. The verdict is a function
+# of the pull request body, not of the files it touches, so a path filter would
+# silently drop the gate on exactly the pull requests whose bodies still need
+# judging. That is the one intentional exception to the repo rule that every
+# pull_request workflow excludes the release-please output set;
+# test/release-ci-exclusions.test.ts encodes both halves.
 on:
   pull_request:
+    # no-mistakes #773 dropped synchronize because the pipeline pushed the head
+    # before writing the body attestation, so a synchronize event pinned a
+    # FAILURE check to the new head before the body was rewritten. Since
+    # no-mistakes #994 the pipeline writes the attestation before it pushes, so
+    # synchronize is the event that judges a pipeline-pushed head. T2 restores
+    # it for that reason.
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
-    # Never create a run for a release-please PR. The job-level author exemption
-    # below cannot do this: it is evaluated inside a run, and a GITHUB_TOKEN PR's
-    # run is created in action_required and never starts.
-    paths-ignore:
-      - .release-please-manifest.json
-      - CHANGELOG.md
-      - package.json
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
 # an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# opened/edited checks. Keep reopened coalescing as before.
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
   cancel-in-progress: true
@@ -29,38 +35,30 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
-    # Known automation accounts are exempt so the release pipeline keeps working:
-    # - github-actions[bot] opens the release-please PR via GITHUB_TOKEN
-    # - dependabot[bot] opens dependency update PRs
+    # Known automation accounts are exempt so automation keeps working:
+    # - github-actions[bot] opens PRs via GITHUB_TOKEN, including every
+    #   release-please release PR, so no structural release-please exemption is
+    #   needed here any more.
+    # - dependabot[bot] opens dependency update PRs.
     # Other authors (human or bot) must raise PRs through `git push no-mistakes`.
+    #
+    # These stay job-level rather than moving to the action's `exempt-authors`
+    # input on purpose: an in-job exemption still requires the run to start, and
+    # a GITHUB_TOKEN PR's run is created in action_required and never starts.
+    # The fork ships direct PRs, so the gate only runs on the upstream repo.
     if: >-
+      github.repository == 'kunchenguid/quota-axi' &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.user.login != 'release-please[bot]'
+      github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Verify no-mistakes signature in PR body
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
-            exit 0
-          fi
-          {
-            echo "::error::This PR was not raised through no-mistakes."
-            echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
-            echo
-            echo "    $marker"
-            echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
-            echo
-            echo "PR author: ${PR_AUTHOR}"
-          } >&2
-          exit 1
+      # The enforcement itself lives in the shared composite action in the
+      # no-mistakes repository, so this repository no longer carries its own
+      # copy of the script to drift.
+      #
+      # Pinned to an immutable commit, never @main: main is editable by the very
+      # pull request this gate is judging. Bumping the pin is a separate,
+      # deliberate pull request.
+      - name: Verify no-mistakes signature and pipeline attestation in PR body
+        uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970 # v1.80.1
+        with:
+          exempt-authors: kunchenguid

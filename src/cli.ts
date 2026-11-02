@@ -5,6 +5,7 @@ import {
   quotaCommand,
   type QuotaContext,
 } from "./commands.js";
+import { PROVIDER_IDS } from "./types.js";
 import { VERSION } from "./version.js";
 
 export const DESCRIPTION =
@@ -14,19 +15,35 @@ export const TOP_HELP = `usage: quota-axi [quota|auth|models] [flags]
 commands[3]:
   (none)=quota, auth, models
 output:
-  Default TOON reports local quota evidence. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (q quits).
-flags[12]:
-  --provider <claude,codex,cursor,copilot,grok,kimi,bigpickle,anthropic_api>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --allow-keychain-prompt, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
+  Default TOON reports local quota evidence. Providers that are not set up are omitted and counted in one help line; --full and an explicit --provider list them. --json keeps every provider and sets notSetUp true on the absent ones. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (r refreshes, q quits); providers that are not set up fold into one line that a or --all expands.
+  Repeated --provider flags accumulate in first-seen order: --provider zai --provider codex equals --provider zai,codex.
+  --tui palette: --theme light|dark|system, else QUOTA_AXI_THEME, else dark. system follows OS appearance on each refresh; unavailable or unknown settings fall back to dark.
+notes:
+  Every quota read, including each --tui refresh, may delegate an expired session's renewal to the vendor CLI that owns it. --no-credential-refresh disables delegated credential refresh; auth is always read-only.
+  {"tui":{"show":"used"}} in ~/.config/quota-axi/config.json (or $XDG_CONFIG_HOME/quota-axi/config.json) makes --tui draw what each window has used instead of what is left, and {"tui":{"accountLabels":{"~/.claude-work":"work","claude-swap:<digest>":"team"}}} titles the lane with that config directory or account key claude · work or claude · team on its --tui card; neither changes TOON or JSON.
+  Every read asks the vendor unless --max-age <duration> or QUOTA_AXI_MAX_AGE (the flag wins) opts into reuse: a provider's last successful reading is then served while younger than that bound and the credential selection and local credential files are unchanged, and processes starting together make one vendor read. --full ignores QUOTA_AXI_MAX_AGE, and --tui r always reads the vendor. A reused reading stays fresh and carries reused true plus its original refreshedAt. QUOTA_AXI_SNAPSHOT=<cache-format file> answers every provider from that file instead, for tests and fixtures.
+  Claude reports one lane, the profile this process selects, unless QUOTA_AXI_CLAUDE_PROFILES opts in: a path-delimiter-separated list of absolute Claude config directories (each exactly as CLAUDE_CONFIG_DIR would name it). Then the selected profile, the default profile when it holds a credential, and each listed directory become their own accountKey lanes; only the selected lane uses CLAUDE_CODE_OAUTH_TOKEN or delegated refresh, and --full --json names each lane's accountLocator. QUOTA_AXI_CLAUDE_SWAP=1 instead reports one claude-swap:<digest> lane per account the third-party claude-swap lists in \`cswap list --json\`, taking no credential from it. Failures are unavailable and never fall back to native Claude; auth and --no-credential-refresh do not run cswap.
+  --profile-only requires explicit CLAUDE_CONFIG_DIR or CODEX_HOME plus exactly one matching provider. It reads only that credential file: no Keychain, Pi, CLI RPC, fallback, refresh, or cache. With --full --json, non-secret account identity, source, and attempts remain visible; tokens and file contents remain excluded, and ordinary output remains redacted.
+flags[18]:
+  --provider <${PROVIDER_IDS.join(",")}>, --json, --full, --tui, --refresh <30s-24h>, --once, --active-only, --theme <light|dark|system>, --all, --max-age <0-1h>, --allow-keychain-prompt, --allow-claude-inference, --no-credential-refresh, --profile-only, --intelligence <high|medium|low>, --sort <runway>, --help, -v/--version
 examples:
   quota-axi
   quota-axi --provider claude
-  quota-axi --provider cursor,copilot,grok,kimi
+  quota-axi --provider claude --allow-claude-inference
+  CLAUDE_CONFIG_DIR=/path/to/profile quota-axi --provider claude --profile-only --full --json
+  quota-axi --provider agy
+  quota-axi --provider cursor,copilot,grok,kimi,zai
   quota-axi --json
   quota-axi --full
   quota-axi --tui
   quota-axi --tui --refresh 1m
   quota-axi --tui --once
   quota-axi --tui --active-only
+  quota-axi --tui --all
+  quota-axi --tui --theme light
+  quota-axi --no-credential-refresh
+  quota-axi --json --max-age 90s
+  quota-axi --tui --no-credential-refresh
   quota-axi auth
   quota-axi models --intelligence high
   quota-axi models --sort runway
@@ -72,6 +89,7 @@ export async function main(options: MainOptions = {}): Promise<void> {
  * the SDK own routing, help, version, and error framing.
  */
 export function normalizeArgv(raw: string[]): string[] {
+  if (raw[0] === "--") raw = raw.slice(1);
   if (raw.length === 0) return ["quota"];
   if (findLegacyFlag(raw, (arg) => arg === "--help" || arg === "-h") >= 0) {
     return ["--help"];

@@ -1,7 +1,13 @@
 import { mkdirSync, readFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { traceInput } from "./input-trace.js";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  claudeEnvOauthToken,
+  claudeProfileLocations,
+} from "./claude-profile.js";
 
 export type JsonFileReadResult =
   | { status: "success"; value: unknown }
@@ -48,21 +54,116 @@ export function cacheFilePath(): string {
   return join(cacheDirPath(), "quotas.json");
 }
 
+/**
+ * An opaque, deterministic cache-provenance identifier for the Claude profile
+ * selected by the current process, or for `profile` when one is given. The
+ * selected path never leaves this helper.
+ */
+export function claudeCredentialContextId(
+  profile: ReturnType<typeof claudeProfileLocations> = claudeProfileLocations(),
+): string {
+  return claudeProfileContextId(profile, claudeEnvOauthToken() !== undefined);
+}
+
+/**
+ * The identity a profile's own stored credential (file or Keychain item) is
+ * cached under, whether or not `CLAUDE_CODE_OAUTH_TOKEN` happens to be set on
+ * this invocation. A lane that never consults that token, and a stored
+ * credential's own rejection, belong to this identity rather than the
+ * env-marked one {@link claudeCredentialContextId} returns.
+ */
+export function claudeStoredProfileContextId(
+  profile: ReturnType<typeof claudeProfileLocations> = claudeProfileLocations(),
+): string {
+  return claudeProfileContextId(profile, false);
+}
+
+function claudeProfileContextId(
+  profile: ReturnType<typeof claudeProfileLocations>,
+  envSelected: boolean,
+): string {
+  const { configDir, keychainService } = profile;
+  // Include the exact service: it already encodes the secure-storage selector,
+  // including a relative raw path hash.
+  // Version the identity to withhold snapshots an earlier release wrote for
+  // this same selection: `v2` covers former opaque discovery, `v3` the windows
+  // 0.1.50 stored with `utilization`/`percent` read as remaining.
+  //
+  // An explicit environment token selects an account the profile path and
+  // Keychain service do not describe, so it earns its own identity: a snapshot
+  // taken with one must never be served as stale once it is gone. The marker is
+  // appended only when such a token is supplied, so every existing profile
+  // keeps the identity it already cached under. It is a presence marker, never
+  // any part of the token.
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "claude-profile-v3",
+        resolve(configDir),
+        keychainService,
+        ...(envSelected ? ["env-token"] : []),
+      ]),
+    )
+    .digest("hex");
+}
+
+// The grant is per Keychain item, so the marker is keyed by the service the
+// value read will name, which already encodes any explicit profile directory.
 export function claudeKeychainAccessMarkerPath(
   account: string,
-  configDir?: string,
+  service: string,
 ): string {
-  const profileSuffix = configDir
-    ? `-${createHash("sha256").update(configDir).digest("hex").slice(0, 8)}`
-    : "";
+  const serviceSuffix = createHash("sha256")
+    .update(service)
+    .digest("hex")
+    .slice(0, 8);
   const accountSuffix = createHash("sha256")
     .update(account)
     .digest("hex")
     .slice(0, 16);
   return join(
     cacheDirPath(),
-    `claude-keychain-access-granted${profileSuffix}-account-${accountSuffix}`,
+    `claude-keychain-access-granted-${serviceSuffix}-account-${accountSuffix}`,
   );
+}
+
+export function cursorCliKeychainAccessMarkerPath(account: string): string {
+  const accountSuffix = createHash("sha256")
+    .update(account)
+    .digest("hex")
+    .slice(0, 16);
+  return join(
+    cacheDirPath(),
+    `cursor-cli-keychain-access-granted-account-${accountSuffix}`,
+  );
+}
+
+/** Non-secret proof scoped to the exact Copilot config path, service, and account. */
+export function copilotCliKeychainAccessMarkerPath(
+  path: string,
+  service: string,
+  account: string,
+): string {
+  const suffix = createHash("sha256")
+    .update(JSON.stringify([resolve(path), service, account]))
+    .digest("hex");
+  return join(cacheDirPath(), `copilot-cli-keychain-access-granted-${suffix}`);
+}
+
+/** Non-secret proof scoped to the exact Muse Keychain service and account. */
+export function museKeychainAccessMarkerPath(
+  service: string,
+  account: string,
+): string {
+  const suffix = createHash("sha256")
+    .update(JSON.stringify([service, account]))
+    .digest("hex");
+  return join(cacheDirPath(), `muse-keychain-access-granted-${suffix}`);
+}
+
+/** Path of Muse's key-endpoint attempt ledger, beside the quota cache. */
+export function museKeyReadLedgerPath(): string {
+  return join(cacheDirPath(), "muse-key-reads.json");
 }
 
 function cacheDirPath(): string {
@@ -80,6 +181,20 @@ export function readJsonFile(file: string): unknown | undefined {
 }
 
 export function readJsonFileResult(file: string): JsonFileReadResult {
+  traceInput(file);
+  return readUntracedJsonFileResult(file);
+}
+
+/**
+ * The same read without recording it as an input of the current reading, for
+ * quota-axi's own state such as the cache, which every write changes.
+ */
+export function readUntracedJsonFile(file: string): unknown | undefined {
+  const result = readUntracedJsonFileResult(file);
+  return result.status === "success" ? result.value : undefined;
+}
+
+function readUntracedJsonFileResult(file: string): JsonFileReadResult {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
@@ -91,6 +206,35 @@ export function readJsonFileResult(file: string): JsonFileReadResult {
     return { status: "success", value: JSON.parse(text) };
   } catch {
     return { status: "invalid", error: "json_parse_error" };
+  }
+}
+
+/**
+ * Read at most `maxBytes + 1` bytes, so a caller can tell an oversized file from
+ * one that fits without ever holding more than its own limit in memory.
+ */
+export async function readBoundedFile(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  traceInput(path);
+  const file = await open(path, "r");
+  try {
+    const contents = new Uint8Array(maxBytes + 1);
+    let offset = 0;
+    while (offset < contents.byteLength) {
+      const { bytesRead } = await file.read(
+        contents,
+        offset,
+        contents.byteLength - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return Buffer.from(contents.buffer, contents.byteOffset, offset);
+  } finally {
+    await file.close();
   }
 }
 

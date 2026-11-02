@@ -1,0 +1,1285 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  currentUserProcessListArgs,
+  type ExecFileTextOptions,
+} from "../../src/lib/process.js";
+import { readCachedProvider, writeCachedProviders } from "../../src/cache.js";
+import {
+  agyAdapter,
+  fetchQuota,
+  fetchQuotaWithRuntime,
+  inspectAuthWithRuntime,
+  normalizeAgyPrintUsage,
+  normalizeAgyQuotaSummary,
+  normalizeAgyUserStatus,
+  portsFromLsof,
+  processInfosFromPs,
+  requestLoopbackJson,
+  type AgyConnectionEndpoint,
+  type AgyProbeRuntime,
+} from "../../src/providers/agy.js";
+import { providerPresence } from "../../src/lib/source-attempts.js";
+import { withQuotaSemantics } from "../../src/interpretation.js";
+import type { ProviderQuota } from "../../src/types.js";
+
+const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+const originalPath = process.env.PATH;
+const originalWorkingDirectory = process.cwd();
+let tempDir: string | undefined;
+const servers: ReturnType<typeof createServer>[] = [];
+
+beforeEach(() => {
+  useTempCache();
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  await Promise.all(
+    servers.splice(0).map((server) => {
+      server.closeAllConnections();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    }),
+  );
+  if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+  else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
+  process.chdir(originalWorkingDirectory);
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  tempDir = undefined;
+});
+
+// The vendor names each bucket's window ("5h" or "weekly"), which fixes its
+// cycle length; quota-axi derives pace from that length plus resetsAt.
+const EXPECTED_WINDOW_SECONDS = [
+  ["gemini_5h", 18_000],
+  ["gemini_weekly", 604_800],
+  ["claude_gpt_5h", 18_000],
+  ["claude_gpt_weekly", 604_800],
+];
+
+describe("Antigravity quota parsing", () => {
+  it("normalizes quota summary groups into session and weekly windows", () => {
+    const result = normalizeAgyQuotaSummary(fixture("quota-summary.json"));
+
+    expect(result?.windows).toMatchObject([
+      {
+        id: "gemini_5h",
+        label: "Gemini 5-hour",
+        kind: "session",
+        percentUsed: 9,
+        percentRemaining: 91,
+        resetsAt: "2026-06-15T11:39:34.000Z",
+      },
+      {
+        id: "gemini_weekly",
+        label: "Gemini weekly",
+        kind: "weekly",
+        percentUsed: 18,
+        percentRemaining: 82,
+        resetsAt: "2026-06-19T08:45:39.000Z",
+      },
+      {
+        id: "claude_gpt_5h",
+        label: "Claude/GPT 5-hour",
+        kind: "session",
+        percentUsed: 27,
+        percentRemaining: 73,
+        resetsAt: "2026-06-15T12:52:10.000Z",
+      },
+      {
+        id: "claude_gpt_weekly",
+        label: "Claude/GPT weekly",
+        kind: "weekly",
+        percentUsed: 36,
+        percentRemaining: 64,
+        resetsAt: "2026-06-20T00:39:54.000Z",
+      },
+    ]);
+    expect(
+      result?.windows.map(({ id, windowSeconds }) => [id, windowSeconds]),
+    ).toEqual(EXPECTED_WINDOW_SECONDS);
+  });
+
+  it("normalizes the Antigravity CLI 1.2.2 quota summary shape", () => {
+    const result = normalizeAgyQuotaSummary(
+      fixture("quota-summary-v1.2.2.json"),
+    );
+
+    expect(result?.windows).toMatchObject([
+      { id: "gemini_5h", kind: "session", percentRemaining: 88 },
+      { id: "gemini_weekly", kind: "weekly", percentRemaining: 76 },
+      { id: "claude_gpt_5h", kind: "session", percentRemaining: 64 },
+      { id: "claude_gpt_weekly", kind: "weekly", percentRemaining: 52 },
+    ]);
+  });
+
+  it("normalizes the exact Antigravity CLI 1.2.2 print envelope", () => {
+    const result = normalizeAgyPrintUsage(fixture("usage-print-v1.2.2.json"));
+
+    expect(result?.windows).toMatchObject([
+      { id: "gemini_5h", kind: "session", percentRemaining: 88 },
+      { id: "gemini_weekly", kind: "weekly", percentRemaining: 76 },
+      { id: "claude_gpt_5h", kind: "session", percentRemaining: 64 },
+      { id: "claude_gpt_weekly", kind: "weekly", percentRemaining: 52 },
+    ]);
+  });
+
+  it.each(["window", "bucketId", "bucket_id", "displayName", "name"])(
+    "leaves unfamiliar cycles in %s unmeasured",
+    (field) => {
+      for (const label of [
+        "biweekly",
+        "bi-weekly",
+        "bi_weekly",
+        "weekend",
+        "15h",
+        "five-day",
+        "five-hourly",
+      ]) {
+        for (const groupName of ["Gemini Models", "Claude and GPT Models"]) {
+          const result = normalizeAgyQuotaSummary({
+            groups: [
+              {
+                displayName: groupName,
+                buckets: [
+                  {
+                    [field === "bucket_id" ? "bucket_id" : "bucketId"]:
+                      "unfamiliar",
+                    [field]: label,
+                    remainingFraction: 0.9,
+                    resetTime: "2026-06-19T00:00:00.000Z",
+                  },
+                ],
+              },
+            ],
+          });
+          expect(result?.windows).toHaveLength(1);
+          expect(result?.windows[0]?.kind).toBe("unknown");
+          expect(result?.windows[0]?.windowSeconds).toBeUndefined();
+        }
+      }
+    },
+  );
+
+  it("normalizes oneof remaining values", () => {
+    const result = normalizeAgyQuotaSummary({
+      groups: [
+        {
+          displayName: "Gemini Models",
+          buckets: [
+            {
+              bucketId: "gemini-weekly",
+              displayName: "Weekly Limit",
+              remaining: { case: "remainingFraction", value: 0.5 },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result?.windows[0]).toMatchObject({
+      id: "gemini_weekly",
+      percentUsed: 50,
+      percentRemaining: 50,
+    });
+    expect(result?.windows[0]?.windowSeconds).toBe(604_800);
+  });
+
+  it("normalizes the agy CLI /quota print envelope", () => {
+    const result = normalizeAgyPrintUsage(fixture("cli-quota.json"));
+
+    expect(result?.windows.map(({ id }) => id)).toEqual([
+      "gemini_weekly",
+      "claude_gpt_5h",
+      "claude_gpt_weekly",
+    ]);
+    expect(result?.windows).toMatchObject([
+      {
+        id: "gemini_weekly",
+        percentRemaining: 0,
+      },
+      {
+        id: "claude_gpt_5h",
+        percentRemaining: 100,
+      },
+      {
+        id: "claude_gpt_weekly",
+        percentRemaining: 90,
+      },
+    ]);
+    expect(
+      result?.windows.map(({ id, windowSeconds }) => [id, windowSeconds]),
+    ).toEqual([
+      ["gemini_weekly", 604_800],
+      ["claude_gpt_5h", 18_000],
+      ["claude_gpt_weekly", 604_800],
+    ]);
+  });
+
+  it("falls back to model windows from user status payloads", () => {
+    const result = normalizeAgyUserStatus(fixture("user-status.json"));
+
+    expect(result?.plan).toBe("Google AI Pro");
+    expect(result?.account?.email).toBe("person@example.invalid");
+    expect(result?.windows).toMatchObject([
+      {
+        id: "model:model_fixture_gemini_flash",
+        label: "Gemini 3.5 Flash (Medium)",
+        kind: "model",
+        percentRemaining: 100,
+      },
+      {
+        id: "model:model_fixture_claude_sonnet",
+        label: "Claude Sonnet Fixture",
+        kind: "model",
+        percentRemaining: 50,
+      },
+    ]);
+  });
+
+  it("parses Antigravity processes and listening ports without matching prompt text", () => {
+    const processes = processInfosFromPs(`
+      101 /Users/test/.local/bin/agy
+      102 /Applications/Google Antigravity.app/Contents/Resources/bin/language-server --csrf_token token --extension_server_port 64123
+      103 /usr/bin/node /opt/antigravity-cli/mcp-server.cjs --port 64124
+      104 codex --prompt "antigravity-cli mcp-server.cjs language_server"
+      105 /usr/bin/node /opt/runner.cjs --prompt "/opt/antigravity-cli/mcp-server.cjs"
+      106 /usr/bin/codex --prompt "/Applications/Antigravity.app/Contents/bin/language_server --csrf_token fake"
+      108 /usr/bin/node /Applications/Antigravity IDE.app/Contents/bin/language_server_macos_arm --csrf_token fake
+    `);
+
+    expect(processes).toMatchObject([
+      { pid: 101, source: "agy" },
+      {
+        pid: 102,
+        source: "app",
+        csrfToken: "token",
+        extensionPort: 64123,
+      },
+      { pid: 103, source: "agy" },
+    ]);
+    expect(
+      portsFromLsof(`
+COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+agy 101 test 8u IPv4 0x1 0t0 TCP 127.0.0.1:64440 (LISTEN)
+agy 101 test 9u IPv4 0x2 0t0 TCP 127.0.0.1:64441 (LISTEN)
+`),
+    ).toEqual([64440, 64441]);
+  });
+
+  it("recognizes the Antigravity IDE app bundle when its name contains spaces", () => {
+    const processes = processInfosFromPs(`
+      107 /Applications/Antigravity IDE.app/Contents/Resources/app/extensions/antigravity/bin/language_server_macos_arm --csrf_token ide-token --extension_server_port 56512
+    `);
+
+    expect(processes).toMatchObject([
+      {
+        pid: 107,
+        source: "app",
+        csrfToken: "ide-token",
+        extensionPort: 56512,
+      },
+    ]);
+  });
+});
+
+describe("Antigravity provider", () => {
+  it("fetches quota from an already-running loopback endpoint and merges identity", async () => {
+    const runtime = runtimeWith({
+      ps: "123 /Users/test/.local/bin/agy\n",
+      lsof: lsofFor(123, 64440),
+      responses: {
+        "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+          fixture("quota-summary.json"),
+        "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+          fixture("user-status.json"),
+      },
+    });
+
+    const result = await fetchQuotaWithRuntime(runtime);
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.source).toBe("cli-rpc");
+    expect(result.plan).toBe("Google AI Pro");
+    expect(result.account?.email).toBe("person@example.invalid");
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "gemini_5h",
+      "gemini_weekly",
+      "claude_gpt_5h",
+      "claude_gpt_weekly",
+    ]);
+  });
+
+  it("probes app language-server endpoints with CSRF before quota requests", async () => {
+    const calls: Array<{ endpoint: AgyConnectionEndpoint; path: string }> = [];
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Applications/Google Antigravity.app/Contents/Resources/bin/language-server --csrf_token token --extension_server_port 64123 --extension_server_csrf_token extension-token\n",
+        lsof: lsofFor(123, 64440),
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUnleashData":
+            {},
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            fixture("quota-summary.json"),
+        },
+        onRequest(endpoint, path) {
+          calls.push({ endpoint, path });
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(calls[0]?.path).toBe(
+      "/exa.language_server_pb.LanguageServerService/GetUnleashData",
+    );
+    expect(calls[0]?.endpoint).toMatchObject({
+      csrfToken: "token",
+      requiresCsrfToken: true,
+      requiresUnleashProbe: true,
+    });
+    expect(calls.every((call) => call.endpoint.port !== 64123)).toBe(true);
+  });
+
+  it("uses an extension port only when the app process owns its listener", async () => {
+    const calls: AgyConnectionEndpoint[] = [];
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Applications/Google Antigravity.app/Contents/Resources/bin/language-server --csrf_token main-token --extension_server_port 64123 --extension_server_csrf_token extension-token\n",
+        lsof: `${lsofFor(123, 64440)}agy 123 test 9u IPv4 0x2 0t0 TCP 127.0.0.1:64123 (LISTEN)\n`,
+        requestJson: async (endpoint, path) => {
+          calls.push(endpoint);
+          if (
+            endpoint.port === 64123 &&
+            endpoint.csrfToken === "extension-token"
+          ) {
+            if (path.endsWith("GetUnleashData")) return {};
+            if (path.endsWith("RetrieveUserQuotaSummary"))
+              return fixture("quota-summary.json");
+          }
+          throw new Error("connect ECONNREFUSED");
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        port: 64123,
+        csrfToken: "extension-token",
+      }),
+    );
+  });
+
+  it("reports unavailable without trying HTTP when Antigravity is not running", async () => {
+    const requestJson = vi.fn();
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({ ps: "", lsof: "", requestJson }),
+    );
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.error).toBe("Antigravity/agy is not running");
+    expect(requestJson).not.toHaveBeenCalled();
+  });
+
+  it("reports unavailable when discovered loopback endpoints are absent", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, 64440),
+        requestJson: async () => {
+          throw new Error("connect ECONNREFUSED 127.0.0.1:64440");
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.error).toBe("connect ECONNREFUSED 127.0.0.1:64440");
+  });
+
+  it("preserves sanitized process and port discovery failures", async () => {
+    const processResult = await fetchQuotaWithRuntime(
+      runtimeWith({ psError: new Error("ps failed at /Users/private") }),
+    );
+    const portResult = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsofError: new Error("lsof denied for private-host"),
+      }),
+    );
+
+    expect(processResult.state).toMatchObject({
+      status: "error",
+      error: "Antigravity process discovery failed",
+    });
+    expect(portResult.state).toMatchObject({
+      status: "error",
+      error: "Antigravity port discovery failed",
+    });
+  });
+
+  it("preserves sanitized discovery failures during auth inspection", async () => {
+    const processResult = await inspectAuthWithRuntime(
+      runtimeWith({ psError: new Error("ps failed at /Users/private") }),
+    );
+    const portResult = await inspectAuthWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsofError: new Error("lsof denied for private-host"),
+      }),
+    );
+
+    expect(processResult.sources).toEqual([
+      {
+        source: "loopback",
+        status: "error",
+        error: "Antigravity process discovery failed",
+      },
+    ]);
+    expect(portResult.sources).toEqual([
+      {
+        source: "loopback",
+        status: "error",
+        error: "Antigravity port discovery failed",
+      },
+    ]);
+  });
+
+  it("continues discovery when another verified process has listening ports", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n124 /Users/test/.local/bin/agy\n",
+        lsofByPid: {
+          123: new Error("permission denied"),
+          124: lsofFor(124, 64441),
+        },
+        responses: {
+          "https:64441:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            fixture("quota-summary.json"),
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+  });
+
+  it("falls back to model quotas when quota summary has no usable buckets", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, 64440),
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            { response: { groups: [] } },
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            fixture("user-status.json"),
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "model:model_fixture_gemini_flash",
+      "model:model_fixture_claude_sonnet",
+    ]);
+  });
+
+  it("continues past a malformed endpoint to a later valid port", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: `${lsofFor(123, 64440)}agy 123 test 9u IPv4 0x2 0t0 TCP 127.0.0.1:64441 (LISTEN)\n`,
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            { response: { groups: [] } },
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            { response: { groups: [] } },
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs":
+            { response: { groups: [] } },
+          "https:64441:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            fixture("quota-summary.json"),
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.windows[0]?.id).toBe("gemini_5h");
+  });
+
+  it("bounds probing across all discovered endpoints", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const resultPromise = fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: `${lsofFor(123, 64440)}agy 123 test 9u IPv4 0x2 0t0 TCP 127.0.0.1:64441 (LISTEN)\n`,
+        requestJson: async (endpoint, path) => {
+          calls.push(`${endpoint.scheme}:${endpoint.port}:${path}`);
+          return new Promise<never>(() => undefined);
+        },
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await resultPromise;
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.error).toBe("Antigravity probe timed out");
+    expect(calls).toHaveLength(4);
+    vi.useRealTimers();
+  });
+
+  it("reports malformed loopback responses as errors", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, 64440),
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            { response: { groups: [] } },
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            { response: { groups: [] } },
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs":
+            { response: { groups: [] } },
+          "http:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            { response: { groups: [] } },
+          "http:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            { response: { groups: [] } },
+          "http:64440:/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs":
+            { response: { groups: [] } },
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("error");
+    expect(result.state.error).toBe("Antigravity quota summary malformed");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "does not serve cached quota when Antigravity is uninstalled",
+    async () => {
+      writeCachedProviders([cachedAgyQuota()]);
+
+      const result = await fetchQuotaWithRuntime(runtimeWith({ ps: "" }));
+
+      expect(result.state.status).toBe("unavailable");
+      expect(result.state.error).toBe("Antigravity/agy is not running");
+      expect(result.source).not.toBe("cache");
+      expect(providerPresence(result, agyAdapter)).toBe("absent");
+      expect(readCachedProvider("agy")).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "keeps cached quota when Windows cannot confirm Antigravity absence",
+    async () => {
+      const runtime = runtimeWith({ ps: "" });
+      const withoutCache = await fetchQuotaWithRuntime(runtime);
+
+      expect(providerPresence(withoutCache, agyAdapter)).toBe("absent");
+
+      writeCachedProviders([cachedAgyQuota()]);
+      const result = await fetchQuotaWithRuntime(runtime);
+
+      expect(result.state.status).toBe("stale");
+      expect(result.source).toBe("cache");
+      expect(providerPresence(result, agyAdapter)).toBe("stale");
+      expect(readCachedProvider("agy")).toBeDefined();
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reports attention and preserves cache when agy process is running but has no accessible port",
+    async () => {
+      const runtime = runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: "",
+        cliQuota: Object.assign(new Error("agy missing"), { code: "ENOENT" }),
+      });
+      const withoutCache = await fetchQuotaWithRuntime(runtime);
+
+      expect(providerPresence(withoutCache, agyAdapter)).toBe("attention");
+
+      writeCachedProviders([cachedAgyQuota()]);
+      const result = await fetchQuotaWithRuntime(runtime);
+
+      expect(result.state.status).toBe("stale");
+      expect(result.source).toBe("cache");
+      expect(readCachedProvider("agy")).toBeDefined();
+    },
+  );
+
+  it("preserves cache when language-server process is running without a CSRF token", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+    const port = 64440;
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: `123 /Applications/Google Antigravity.app/Contents/Resources/bin/language-server\n`,
+        lsofByPid: { 123: lsofFor(123, port) },
+        cliQuota: Object.assign(new Error("agy missing"), { code: "ENOENT" }),
+      }),
+    );
+
+    expect(result.state.status).toBe("stale");
+    expect(result.source).toBe("cache");
+    expect(readCachedProvider("agy")).toBeDefined();
+  });
+
+  it("preserves authentication failures and retires stale cache", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+    const port = await startServer((_response) => {
+      _response.writeHead(401, { "content-type": "application/json" });
+      _response.end(JSON.stringify({ error: "secret-account@example.test" }));
+    });
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, port),
+        requestJson: requestLoopbackJson,
+      }),
+    );
+
+    expect(result.state).toMatchObject({
+      status: "auth_required",
+      error: "Antigravity sign-in required",
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-account");
+    expect(readCachedProvider("agy")).toBeUndefined();
+  });
+
+  it("prefers agy CLI /quota over loopback when both are available", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+    const commands: Array<{
+      command: string;
+      args: string[];
+      timeoutMs: number;
+      path?: string;
+    }> = [];
+    let loopbackCalled = false;
+    const port = await startServer((response) => {
+      loopbackCalled = true;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(fixture("quota-summary-v1.2.2.json")));
+    });
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, port),
+        agyPath: "/Users/test/.local/bin/agy",
+        agyOutput: JSON.stringify(fixture("usage-print-v1.2.2.json")),
+        requestJson: requestLoopbackJson,
+        onExec(command, args, timeoutMs, options) {
+          commands.push({
+            command,
+            args,
+            timeoutMs,
+            path: options?.env?.PATH,
+          });
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.source).toBe("cli");
+    expect(result.account).toBeUndefined();
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "gemini_5h",
+      "gemini_weekly",
+      "claude_gpt_5h",
+      "claude_gpt_weekly",
+    ]);
+    expect(commands.at(-1)).toMatchObject({
+      command: "/Users/test/.local/bin/agy",
+      args: ["-p", "/quota", "--output-format", "json"],
+      timeoutMs: 15_000,
+    });
+    expect(
+      commands.at(-1)?.path?.split(delimiter).slice(1).join(delimiter),
+    ).toBe(process.env.PATH ?? "");
+    expect(loopbackCalled).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32").each([
+    ["xdg-open", "inherited PATH"],
+    ["xdg-open", "working directory"],
+    ["open", "inherited PATH"],
+    ["open", "working directory"],
+  ] as const)(
+    "prevents a signed-out agy quota probe from invoking %s in the %s",
+    async (opener, openerLocation) => {
+      const bin = join(tempDir as string, "bin");
+      const workingDirectory = join(tempDir as string, "working");
+      const marker = join(tempDir as string, "browser-opened");
+      mkdirSync(bin);
+      mkdirSync(workingDirectory);
+      writeFileSync(
+        join(bin, "agy"),
+        `#!/bin/sh
+${opener} 'https://accounts.example.invalid/oauth'
+exit 1
+`,
+      );
+      const openerDirectory =
+        openerLocation === "inherited PATH" ? bin : workingDirectory;
+      writeFileSync(
+        join(openerDirectory, opener),
+        `#!/bin/sh
+printf opened > '${marker}'
+`,
+      );
+      chmodSync(join(bin, "agy"), 0o700);
+      chmodSync(join(openerDirectory, opener), 0o700);
+      process.env.PATH = bin;
+      process.chdir(workingDirectory);
+
+      const result = await fetchQuota({
+        allowKeychainPrompt: false,
+        refreshCredentials: false,
+      });
+
+      expect(result.state).toMatchObject({
+        status: "error",
+        error: "Antigravity CLI /quota failed",
+      });
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  it
+    .skipIf(process.platform === "win32")
+    .each([
+      "#!/usr/bin/env node",
+      "#!/usr/bin/env -S node --enable-source-maps",
+      ...(existsSync("/bin/env") ? ["#!/bin/env node"] : []),
+    ])(
+    "runs an authenticated agy CLI with the %s shebang when PATH has no node",
+    async (shebang) => {
+      const bin = join(tempDir as string, "bin");
+      const payload = JSON.stringify(fixture("usage-print-v1.2.2.json"));
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "agy"),
+        `${shebang}
+process.stdout.write(${JSON.stringify(payload)});
+`,
+      );
+      chmodSync(join(bin, "agy"), 0o700);
+      process.env.PATH = bin;
+
+      const result = await fetchQuota({
+        allowKeychainPrompt: false,
+        refreshCredentials: false,
+      });
+
+      expect(result.state.status).toBe("fresh");
+      expect(result.source).toBe("cli");
+      expect(result.windows.map((window) => window.id)).toEqual([
+        "gemini_5h",
+        "gemini_weekly",
+        "claude_gpt_5h",
+        "claude_gpt_weekly",
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "preserves runtime lookup in an authenticated shell launcher",
+    async () => {
+      const bin = join(tempDir as string, "bin");
+      const script = join(bin, "agy-cli.js");
+      const payload = JSON.stringify(fixture("usage-print-v1.2.2.json"));
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "agy"),
+        `#!/bin/sh
+exec node "$0-cli.js" "$@"
+`,
+      );
+      writeFileSync(
+        script,
+        `process.stdout.write(${JSON.stringify(payload)});
+`,
+      );
+      chmodSync(join(bin, "agy"), 0o700);
+      process.env.PATH = bin;
+
+      const result = await fetchQuota({
+        allowKeychainPrompt: false,
+        refreshCredentials: false,
+      });
+
+      expect(result.state.status).toBe("fresh");
+      expect(result.source).toBe("cli");
+    },
+  );
+
+  it("does not serve stale quota when protected loopback and print usage fail", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+    const port = await startServer((response) => {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          code: "unauthenticated",
+          message: "missing CSRF token",
+        }),
+      );
+    });
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, port),
+        requestJson: requestLoopbackJson,
+      }),
+    );
+
+    expect(result.state).toMatchObject({
+      status: "unavailable",
+      error:
+        "Antigravity CLI quota unavailable because its runtime CSRF token is not exposed; use Antigravity /quota",
+    });
+    expect(result.windows).toEqual([]);
+    expect(readCachedProvider("agy")).toBeDefined();
+  });
+
+  it("sanitizes failures from agy CLI /quota", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        agyPath: "/Users/test/.local/bin/agy",
+        agyError: Object.assign(new Error("private-account@example.test"), {
+          code: "EFAIL",
+        }),
+      }),
+    );
+
+    expect(result.state).toMatchObject({
+      status: "error",
+      error: "Antigravity CLI /quota failed",
+    });
+    expect(JSON.stringify(result)).not.toContain("private-account");
+  });
+
+  it("sends the CLI 1.2.2 read-only request envelope without a token", async () => {
+    let receivedBody: unknown;
+    let receivedCsrfToken: string | undefined;
+    const port = await startServer((response, request) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        if (request.url?.endsWith("RetrieveUserQuotaSummary")) {
+          receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          receivedCsrfToken = request.headers["x-codeium-csrf-token"] as
+            | string
+            | undefined;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(fixture("quota-summary-v1.2.2.json")));
+      });
+    });
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, port),
+        requestJson: requestLoopbackJson,
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(receivedBody).toEqual({ request: {}, forceRefresh: false });
+    expect(receivedCsrfToken).toBeUndefined();
+  });
+
+  it("preserves rate limits over protocol failures", async () => {
+    const port = await startServer((response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(JSON.stringify({ message: "private diagnostic" }));
+    });
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /Users/test/.local/bin/agy\n",
+        lsof: lsofFor(123, port),
+        requestJson: requestLoopbackJson,
+      }),
+    );
+
+    expect(result.state).toMatchObject({
+      status: "rate_limited",
+      error: "Antigravity quota endpoint rate limited",
+    });
+    expect(JSON.stringify(result)).not.toContain("private diagnostic");
+  });
+
+  it("terminates trickling and oversized loopback responses", async () => {
+    const tricklePort = await startServer((response) => {
+      const interval = setInterval(() => response.write(" "), 5);
+      response.on("close", () => clearInterval(interval));
+    });
+    const trickleRequest = requestLoopbackJson(
+      endpointAt(tricklePort),
+      "/quota",
+      50,
+    );
+
+    await expect(trickleRequest).rejects.toThrow(
+      "Antigravity loopback timed out",
+    );
+
+    const oversizedPort = await startServer((response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(`"${"x".repeat(1024 * 1024)}"`);
+    });
+
+    await expect(
+      requestLoopbackJson(endpointAt(oversizedPort), "/quota", 1_000),
+    ).rejects.toThrow("Antigravity loopback response too large");
+  });
+
+  it("does not launch agy when loopback quota succeeds", async () => {
+    const commands: Array<{ command: string; args: string[] }> = [];
+    const runtime = runtimeWith({
+      ps: "123 /Users/test/.local/bin/agy\n",
+      lsof: lsofFor(123, 64440),
+      responses: {
+        "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+          fixture("quota-summary.json"),
+      },
+      onExec(command, args) {
+        commands.push({ command, args });
+      },
+    });
+
+    const result = await fetchQuotaWithRuntime(runtime);
+
+    expect(result.state.status).toBe("fresh");
+    expect(commands).toEqual([
+      {
+        command: "ps",
+        args: currentUserProcessListArgs(process.geteuid() as number),
+      },
+      {
+        command: "lsof",
+        args: ["-nP", "-a", "-p", "123", "-iTCP", "-sTCP:LISTEN"],
+      },
+    ]);
+    expect(commands.map((call) => call.command)).not.toContain("agy");
+  });
+
+  it("reads agy CLI /quota when loopback is down", async () => {
+    const commands: Array<{ command: string; args: string[] }> = [];
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cliQuota: JSON.stringify(fixture("cli-quota.json")),
+        onExec(command, args) {
+          commands.push({ command, args });
+        },
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.source).toBe("cli");
+    expect(result.windows.map(({ id }) => id)).toEqual([
+      "gemini_weekly",
+      "claude_gpt_5h",
+      "claude_gpt_weekly",
+    ]);
+    expect(result.attempts).toEqual([{ source: "cli", status: "success" }]);
+    expect(commands).toContainEqual({
+      command: "agy",
+      args: ["-p", "/quota", "--output-format", "json"],
+    });
+  });
+
+  it("surfaces a genuine CLI failure over the skipped loopback error", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cliQuota: "not json",
+      }),
+    );
+
+    expect(result.state).toMatchObject({
+      status: "error",
+      error: "agy /quota returned invalid JSON",
+    });
+    expect(result.attempts).toEqual([
+      {
+        source: "cli",
+        status: "failed",
+        error: "agy /quota returned invalid JSON",
+        degraded: false,
+      },
+      {
+        source: "loopback",
+        status: "skipped",
+        error: "Antigravity/agy is not running",
+        degraded: false,
+      },
+    ]);
+  });
+
+  it("keeps stale cache for an installed but stopped Antigravity CLI", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        agyPath: "/Users/test/.local/bin/agy",
+        cliQuota: Object.assign(new Error("agy timed out"), {
+          code: "ETIMEDOUT",
+        }),
+      }),
+    );
+
+    expect(result.state.status).toBe("stale");
+    expect(result.source).toBe("cache");
+    expect(result.windows[0]).toMatchObject({
+      id: "gemini_5h",
+      percentRemaining: 88,
+    });
+    expect(readCachedProvider("agy")).toBeDefined();
+  });
+
+  it("does not treat a missing agy CLI as remaining quota", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cliQuota: Object.assign(new Error("agy missing"), { code: "ENOENT" }),
+      }),
+    );
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.error).toBe("Antigravity/agy is not running");
+    expect(result.attempts).toEqual([
+      {
+        source: "cli",
+        status: "skipped",
+        error: "agy CLI is not installed",
+        degraded: false,
+      },
+      {
+        source: "loopback",
+        status: "skipped",
+        error: "Antigravity/agy is not running",
+        degraded: false,
+      },
+    ]);
+  });
+
+  it("keeps the Gemini 4 Argon bucket out of the Gemini bound", async () => {
+    const nowIso = "2026-10-20T00:00:00.000Z";
+    const fetched = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cliQuota: JSON.stringify(fixture("cli-quota-argon.json")),
+      }),
+    );
+    expect(fetched.state.status).toBe("fresh");
+    expect(fetched.windows.map(({ id }) => id)).toEqual([
+      "gemini_weekly",
+      "gemini_argon_weekly",
+      "claude_gpt_weekly",
+    ]);
+
+    const result = withQuotaSemantics(fetched, nowIso);
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "partial",
+      unresolvedWindowIds: ["gemini_argon_weekly"],
+    });
+    expect(result.quotaSemantics?.effectiveAvailability).toMatchObject([
+      {
+        scope: "gemini",
+        boundedBy: ["gemini_weekly"],
+        effectivePercentRemaining: 99,
+      },
+      {
+        scope: "claude_gpt",
+        boundedBy: ["claude_gpt_weekly"],
+        effectivePercentRemaining: 90,
+      },
+    ]);
+  });
+
+  it("marks reading stale when resetsAt is in the past", async () => {
+    const nowIso = "2026-09-15T12:00:00.000Z";
+    const pastReset = new Date(Date.parse(nowIso) - 60_000).toISOString();
+    const quotaData = fixture("cli-quota.json") as {
+      command: {
+        data: {
+          groups: Array<{ buckets: Array<{ reset_time?: string }> }>;
+        };
+      };
+    };
+    const modified = JSON.parse(JSON.stringify(quotaData));
+    modified.command.data.groups[0].buckets[0].reset_time = pastReset;
+
+    const fetched = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cliQuota: JSON.stringify(modified),
+      }),
+    );
+    expect(fetched.state.status).toBe("fresh");
+
+    const result = withQuotaSemantics(fetched, nowIso);
+
+    expect(result.state.status).toBe("stale");
+    expect(result.state.stale).toBe(true);
+  });
+});
+
+function runtimeWith(options: {
+  agyPath?: string;
+  agyOutput?: string;
+  agyError?: Error;
+  ps?: string;
+  lsof?: string;
+  psError?: Error;
+  lsofError?: Error;
+  lsofByPid?: Record<number, string | Error>;
+  cliQuota?: string | Error;
+  requestJson?: AgyProbeRuntime["requestJson"];
+  responses?: Record<string, unknown>;
+  onExec?: (
+    command: string,
+    args: string[],
+    timeoutMs: number,
+    options?: ExecFileTextOptions,
+  ) => void;
+  onRequest?: (endpoint: AgyConnectionEndpoint, path: string) => void;
+}): AgyProbeRuntime {
+  return {
+    async findCommandPath(command) {
+      if (command !== "agy") throw new Error(`unexpected command: ${command}`);
+      return (
+        options.agyPath ?? (options.cliQuota !== undefined ? "agy" : undefined)
+      );
+    },
+    async execFileText(command, args, timeoutMs, execOptions) {
+      options.onExec?.(command, args, timeoutMs, execOptions);
+      if (command === "ps") {
+        if (options.psError) throw options.psError;
+        return options.ps ?? "";
+      }
+      if (command === "lsof") {
+        if (options.lsofError) throw options.lsofError;
+        const pid = Number(args[args.indexOf("-p") + 1]);
+        const output = options.lsofByPid?.[pid];
+        if (output instanceof Error) throw output;
+        return output ?? options.lsof ?? "";
+      }
+      if (
+        command === "agy" ||
+        (options.agyPath && command === options.agyPath)
+      ) {
+        if (options.agyError) throw options.agyError;
+        if (options.cliQuota instanceof Error) throw options.cliQuota;
+        if (typeof options.cliQuota === "string") return options.cliQuota;
+        return options.agyOutput ?? "";
+      }
+      throw new Error(`unexpected command: ${command}`);
+    },
+    async requestJson(
+      endpoint: AgyConnectionEndpoint,
+      path: string,
+      timeoutMs: number,
+    ) {
+      options.onRequest?.(endpoint, path);
+      if (options.requestJson)
+        return options.requestJson(endpoint, path, timeoutMs);
+      const key = `${endpoint.scheme}:${endpoint.port}:${path}`;
+      if (options.responses && key in options.responses)
+        return options.responses[key];
+      throw new Error(`unexpected request: ${key}`);
+    },
+  };
+}
+
+function fixture(name: string): unknown {
+  return JSON.parse(
+    readFileSync(join("test", "fixtures", "agy", name), "utf8"),
+  ) as unknown;
+}
+
+function lsofFor(pid: number, port: number): string {
+  return `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+agy ${pid} test 8u IPv4 0x1 0t0 TCP 127.0.0.1:${port} (LISTEN)
+`;
+}
+
+async function startServer(
+  handler: (response: ServerResponse, request: IncomingMessage) => void,
+): Promise<number> {
+  const server = createServer((request, response) =>
+    handler(response, request),
+  );
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return (server.address() as AddressInfo).port;
+}
+
+function endpointAt(port: number): AgyConnectionEndpoint {
+  return {
+    scheme: "http",
+    port,
+    source: "agy",
+    pid: process.pid,
+    requiresCsrfToken: false,
+    requiresUnleashProbe: false,
+  };
+}
+
+function useTempCache(): void {
+  tempDir = mkdtempSync(join(tmpdir(), "quota-axi-agy-cache-"));
+  process.env.XDG_CACHE_HOME = tempDir;
+}
+
+function cachedAgyQuota(): ProviderQuota {
+  return {
+    provider: "agy",
+    label: "Antigravity",
+    source: "cli-rpc",
+    windows: [
+      {
+        id: "gemini_5h",
+        label: "Gemini 5-hour",
+        kind: "session",
+        percentUsed: 12,
+        percentRemaining: 88,
+        // Still ahead, so a stale fallback may serve it.
+        resetsAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      },
+    ],
+    state: {
+      status: "fresh",
+      stale: false,
+      refreshedAt: "2026-06-15T11:39:34.000Z",
+      sourcesTried: ["loopback"],
+    },
+  };
+}

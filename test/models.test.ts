@@ -20,7 +20,7 @@ describe("model catalog", () => {
     expect(() => validateModelCatalog(MODEL_CATALOG)).not.toThrow();
     expect(
       new Set(MODEL_CATALOG.entries.map((entry) => entry.provider)),
-    ).toEqual(new Set(["claude", "codex", "grok", "kimi"]));
+    ).toEqual(new Set(["claude", "codex", "grok", "kimi", "minimax", "mimo"]));
     expect(
       new Set(MODEL_CATALOG.entries.map((entry) => entry.intelligence)),
     ).toEqual(new Set(["high", "medium", "low"]));
@@ -120,7 +120,7 @@ describe("model quota join", () => {
 function quotaResponse(): QuotaAxiResponse {
   return {
     generatedAt,
-    schemaVersion: 3,
+    schemaVersion: 5,
     providers: [
       {
         provider: "claude",
@@ -234,7 +234,7 @@ function quotaResponseWithRunways(): QuotaAxiResponse {
   ];
   return {
     generatedAt,
-    schemaVersion: 3,
+    schemaVersion: 5,
     providers: [
       {
         provider: "claude",
