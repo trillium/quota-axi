@@ -1214,6 +1214,23 @@ exec node "$0-cli.js" "$@"
       expect(fiveHour?.pace?.status).toBe("unknown");
     });
 
+    it("keeps the reset of a 5-hour window with small nonzero usage", () => {
+      const raw = fixture("quota-summary-unstarted-5h.json") as {
+        response: {
+          groups: Array<{ buckets: Array<Record<string, unknown>> }>;
+        };
+      };
+      const bucket = raw.response.groups[0].buckets.find(
+        (b) => b.bucketId === "gemini-5h",
+      );
+      bucket!.remainingFraction = 0.999;
+      const window = normalizeAgyQuotaSummary(raw)?.windows.find(
+        (w) => w.id === "gemini_5h",
+      );
+      expect(window?.started).toBeUndefined();
+      expect(window?.resetsAt).toBe("2026-11-02T17:00:00.000Z");
+    });
+
     it("keeps spendPriority identical with and without the unstarted 5-hour windows", () => {
       const windows =
         normalizeAgyQuotaSummary(fixture("quota-summary-unstarted-5h.json"))
