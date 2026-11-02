@@ -196,7 +196,7 @@ function semanticsFor(
       );
     case "higgsfield":
       return higgsfieldSemantics(provider.windows, generatedAt);
-    case "anthropic_api":
+    case "anthropic-api":
       return creditsSemantics(provider.windows, generatedAt);
     case "bigpickle":
       return unknownSemantics(

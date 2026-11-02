@@ -46,7 +46,7 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   muse: museAdapter,
   higgsfield: higgsfieldAdapter,
   bigpickle: bigpickleAdapter,
-  anthropic_api: anthropicCreditsAdapter,
+  "anthropic-api": anthropicCreditsAdapter,
 };
 
 export function parseProviders(value: string | undefined): ProviderId[] {
