@@ -196,6 +196,8 @@ function semanticsFor(
       );
     case "higgsfield":
       return higgsfieldSemantics(provider.windows, generatedAt);
+    case "anthropic_api":
+      return creditsSemantics(provider.windows, generatedAt);
     case "bigpickle":
       return unknownSemantics(
         provider.windows,
@@ -688,6 +690,49 @@ const KIMI_ACCOUNT_WINDOW_IDS = new Set(["weekly", "five_hour", "month_total"]);
 
 const KIMI_CODE_SHARE_NOTE =
   "The monthly code window is the code-typed share of that monthly total rather than a separate allowance, so it adds no bound.";
+/**
+ * Declared API credit grants form one pooled balance that pays for any covered
+ * product, so effective remaining is total remaining over total granted. Each
+ * grant is lost at its own expiry, so runway follows the earliest-expiring
+ * grant that still holds credit.
+ */
+function creditsSemantics(
+  windows: QuotaWindow[],
+  generatedAt: string,
+): QuotaSemantics {
+  if (windows.length === 0) {
+    return knownSemantics(
+      [],
+      "No unexpired declared credit grants remain, so there is no API credit balance.",
+    );
+  }
+  const total = windows.reduce((sum, { limitUsd }) => sum + (limitUsd ?? 0), 0);
+  const spent = windows.reduce((sum, { spentUsd }) => sum + (spentUsd ?? 0), 0);
+  const remaining = windows.filter(
+    ({ percentRemaining }) => (percentRemaining ?? 0) > 0,
+  );
+  const earliest = remaining[0] ?? windows[0];
+  const runway = computeEffectiveRunway(
+    remaining.length > 0 ? [earliest] : windows,
+    generatedAt,
+  );
+  const effectivePercentRemaining =
+    total > 0 ? Math.round(((total - spent) / total) * 10_000) / 100 : 0;
+  return knownSemantics(
+    [
+      {
+        scope: "api_credits",
+        status: "known",
+        effectivePercentRemaining,
+        boundedBy: windows.map(({ id }) => id),
+        limitingWindowIds: [earliest.id],
+        pace: summarizeEffectivePace(windows),
+        runway: { ...runway, limitingWindowId: earliest.id },
+      },
+    ],
+    "Declared API credit grants form one pooled balance for the products they cover. Effective remaining is total remaining over total granted; runway follows the earliest-expiring grant that still holds credit. Values are declared by the operator, not measured.",
+  );
+}
 
 function kimiSemantics(
   windows: QuotaWindow[],

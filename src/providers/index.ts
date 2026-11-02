@@ -1,5 +1,6 @@
 import { agyAdapter } from "./agy.js";
 import { alibabaAdapter } from "./alibaba.js";
+import { anthropicCreditsAdapter } from "./anthropic-credits.js";
 import { bigpickleAdapter } from "./bigpickle.js";
 import { claudeAdapter } from "./claude.js";
 import { commandCodeAdapter } from "./commandcode.js";
@@ -45,6 +46,7 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   muse: museAdapter,
   higgsfield: higgsfieldAdapter,
   bigpickle: bigpickleAdapter,
+  anthropic_api: anthropicCreditsAdapter,
 };
 
 export function parseProviders(value: string | undefined): ProviderId[] {

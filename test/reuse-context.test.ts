@@ -34,6 +34,9 @@ const NOT_SELECTING = new Set([
   "XDG_CACHE_HOME",
   // Names a snapshot file that answers instead of every provider
   "QUOTA_AXI_SNAPSHOT",
+  // Locates the declared Anthropic API credit grants, which are re-read every
+  // run and never cached, so there is no reading for fresh reuse to serve
+  "QUOTA_AXI_CONFIG",
 ]);
 
 /** A value no real environment holds, so the cache can be searched for it */

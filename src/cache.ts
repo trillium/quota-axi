@@ -901,6 +901,8 @@ function parseCacheProviders(raw: unknown): CachedProvider[] | undefined {
 }
 
 function toCacheProvider(provider: ProviderQuota): CachedProvider | undefined {
+  // Declared config values are re-read every run and must not outlive edits.
+  if (provider.declared) return undefined;
   // A reading served from the cache observed nothing new; rewriting it would
   // only relabel an old observation.
   if (

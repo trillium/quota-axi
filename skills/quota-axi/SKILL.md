@@ -30,6 +30,7 @@ metadata:
       - muse
       - higgsfield
       - bigpickle
+      - anthropic-api-credits
       - cli
     category: observability
 ---

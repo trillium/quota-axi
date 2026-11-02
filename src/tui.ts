@@ -146,6 +146,7 @@ const MOCHA: Palette = {
     muse: { rgb: [0, 132, 255], ansi16: "94", bold: true },
     higgsfield: { rgb: [255, 176, 122], ansi16: "93", bold: true },
     bigpickle: { rgb: [166, 227, 161], ansi16: "92", bold: true },
+    anthropic_api: { rgb: [235, 160, 172], ansi16: "91", bold: true },
   },
   styles: {
     dim: { rgb: [127, 132, 156], ansi16: "90" },
@@ -1002,6 +1003,17 @@ function cardNotes(provider: ProviderQuota, generatedAtMs: number): string[] {
   }
   if (provider.state.remedyCommand) {
     notes.push(`run: ${provider.state.remedyCommand}`);
+  }
+  if (provider.declared) {
+    notes.push(
+      `declared ${provider.declared.asOf.slice(0, 10)}, not measured${
+        provider.declared.stale ? " · stale" : ""
+      }`,
+    );
+    const applies = provider.windows.find(
+      ({ appliesTo }) => appliesTo?.length,
+    )?.appliesTo;
+    if (applies) notes.push(`covers ${applies.join(", ")}`);
   }
   return notes;
 }

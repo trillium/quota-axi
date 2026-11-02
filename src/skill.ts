@@ -38,6 +38,7 @@ export const HERMES_TAGS = [
   "higgsfield",
   "bigpickle",
 
+  "anthropic-api-credits",
   "cli",
 ];
 export const HERMES_CATEGORY = "observability";

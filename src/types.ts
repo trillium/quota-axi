@@ -18,7 +18,8 @@ export type ProviderId =
   | "devin"
   | "muse"
   | "higgsfield"
-  | "bigpickle";
+  | "bigpickle"
+  | "anthropic_api";
 
 export const PROVIDER_IDS = [
   "claude",
@@ -41,6 +42,7 @@ export const PROVIDER_IDS = [
   "muse",
   "higgsfield",
   "bigpickle",
+  "anthropic_api",
 ] as const satisfies readonly ProviderId[];
 
 export type ProviderSource =
@@ -222,6 +224,8 @@ export type QuotaWindow = {
   usedCredits?: number;
   remainingCredits?: number;
   creditUnit?: string;
+  /** Products a credit grant covers, as declared (credit grants only). */
+  appliesTo?: string[];
   /** Cycle-average pace relative to generatedAt. Not cached. */
   pace?: QuotaPace;
 };
@@ -359,6 +363,17 @@ export type ProviderQuota = {
     completed: number;
     failed: number;
     other: number;
+  };
+  /**
+   * Present when the values were declared by the operator rather than measured
+   * from a provider. Never cached.
+   */
+  declared?: {
+    basis: "declared";
+    asOf: string;
+    ageDays: number;
+    stale: boolean;
+    staleAfterDays: number;
   };
   state: {
     status: ProviderStatus;
