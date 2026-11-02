@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const originalCursorStateDb = process.env.CURSOR_STATE_DB;
+const originalCursorCliConfig = process.env.CURSOR_CLI_CONFIG;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalHome = process.env.HOME;
@@ -13,6 +14,8 @@ beforeEach(() => {
   vi.resetModules();
   tempDir = mkdtempSync(join(tmpdir(), "quota-axi-cursor-auth-"));
   process.env.CURSOR_STATE_DB = join(tempDir, "state.vscdb");
+  // Keeps these editor-source cases independent of any local Cursor CLI sign-in.
+  process.env.CURSOR_CLI_CONFIG = join(tempDir, "cli-config.json");
   process.env.XDG_CACHE_HOME = join(tempDir, "cache");
 });
 
@@ -22,6 +25,9 @@ afterEach(() => {
   vi.resetModules();
   if (originalCursorStateDb === undefined) delete process.env.CURSOR_STATE_DB;
   else process.env.CURSOR_STATE_DB = originalCursorStateDb;
+  if (originalCursorCliConfig === undefined)
+    delete process.env.CURSOR_CLI_CONFIG;
+  else process.env.CURSOR_CLI_CONFIG = originalCursorCliConfig;
   if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
   else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
   if (originalXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -53,7 +59,10 @@ describe("Cursor credential-state reporting", () => {
     }));
 
     const { fetchQuota } = await import("../../src/providers/cursor.js");
-    const result = await fetchQuota({ allowKeychainPrompt: false });
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
 
     expect(result.state.status).toBe("auth_required");
     expect(result.state.error).toBe("Cursor sign-in required");
@@ -64,14 +73,68 @@ describe("Cursor credential-state reporting", () => {
     });
   });
 
+  it("retires a cached snapshot when every Cursor store is absent", async () => {
+    vi.doMock("../../src/lib/process.js", () => ({
+      commandExists: vi.fn(async () => true),
+      execFileText: vi.fn(async () => ""),
+    }));
+    const { writeCachedProviders, readCachedProvider } =
+      await import("../../src/cache.js");
+    writeCachedProviders([
+      {
+        provider: "cursor",
+        label: "Cursor",
+        source: "api",
+        windows: [
+          {
+            id: "included_usage",
+            label: "included usage",
+            kind: "monthly",
+            percentUsed: 10,
+            percentRemaining: 90,
+            resetsAt: new Date(Date.now() + 86_400_000).toISOString(),
+          },
+        ],
+        state: {
+          status: "fresh",
+          stale: false,
+          refreshedAt: "2026-09-12T12:00:00.000Z",
+          sourcesTried: ["api"],
+        },
+      },
+    ]);
+    const { fetchQuota } = await import("../../src/providers/cursor.js");
+    const cached = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+    const bare = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+
+    expect(cached.state).toMatchObject({
+      status: "auth_required",
+      stale: false,
+      error: "Cursor sign-in required",
+    });
+    expect(cached.windows).toEqual([]);
+    expect(bare.state.status).toBe("auth_required");
+    expect(readCachedProvider("cursor")).toBeUndefined();
+  });
+
   it("preserves skipped sqlite discovery failures", async () => {
+    writeFileSync(process.env.CURSOR_STATE_DB!, "");
     vi.doMock("../../src/lib/process.js", () => ({
       commandExists: vi.fn(async () => false),
       execFileText: vi.fn(),
     }));
 
     const { fetchQuota } = await import("../../src/providers/cursor.js");
-    const result = await fetchQuota({ allowKeychainPrompt: false });
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
 
     expect(result.state.status).toBe("error");
     expect(result.state.error).toBe("sqlite3_unavailable");
@@ -79,6 +142,7 @@ describe("Cursor credential-state reporting", () => {
       source: "state-vscdb",
       status: "skipped",
       error: "sqlite3_unavailable",
+      credentialPresent: true,
     });
   });
 
@@ -91,7 +155,10 @@ describe("Cursor credential-state reporting", () => {
     }));
 
     const { fetchQuota } = await import("../../src/providers/cursor.js");
-    const result = await fetchQuota({ allowKeychainPrompt: false });
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
 
     expect(result.state.status).toBe("error");
     expect(result.state.error).toBe("sqlite_read_error");
@@ -99,6 +166,7 @@ describe("Cursor credential-state reporting", () => {
       source: "state-vscdb",
       status: "skipped",
       error: "sqlite_read_error",
+      credentialPresent: true,
     });
   });
 
@@ -111,7 +179,10 @@ describe("Cursor credential-state reporting", () => {
     }));
 
     const { inspectAuth } = await import("../../src/providers/cursor.js");
-    const result = await inspectAuth({ allowKeychainPrompt: false });
+    const result = await inspectAuth({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
 
     expect(result.sources).toContainEqual({
       source: "state-vscdb",
@@ -155,11 +226,180 @@ describe("Cursor credential-state reporting", () => {
     );
 
     const { fetchQuota } = await import("../../src/providers/cursor.js");
-    const result = await fetchQuota({ allowKeychainPrompt: false });
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
 
     expect(result.state.status).toBe("fresh");
     expect(result.account?.email).toBe("person@example.invalid");
     expect(result.plan).toBe("pro");
+  });
+
+  it("requests GetSandUsageStatus and reports grok_bot beside IDE windows", async () => {
+    const requested = new Set<string>();
+    vi.doMock("../../src/lib/process.js", () => ({
+      commandExists: vi.fn(async () => true),
+      execFileText: vi.fn(async (_command: string, args: string[]) => {
+        const query = args.at(-1) ?? "";
+        if (query.includes("cursorAuth/accessToken")) return '"valid-token"';
+        return "";
+      }),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const href = String(url);
+        requested.add(href.slice(href.lastIndexOf("/") + 1));
+        if (href.includes("GetPlanInfo")) {
+          return new Response(
+            JSON.stringify({ planInfo: { planName: "ultra" } }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("GetSandUsageStatus")) {
+          return new Response(
+            JSON.stringify({
+              currentPeriodStart: "2026-08-19T21:37:33.239Z",
+              nextResetTimestampUtc: "2026-08-26T21:37:33.239Z",
+              usagePercent: 38.059383,
+              hasNonZeroIncludedLimit: true,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            billingCycleEnd: "1783036800000",
+            planUsage: { totalPercentUsed: 10 },
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    const { fetchQuota } = await import("../../src/providers/cursor.js");
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+
+    expect([...requested].sort()).toEqual([
+      "GetCurrentPeriodUsage",
+      "GetPlanInfo",
+      "GetSandUsageStatus",
+    ]);
+    expect(result.state.status).toBe("fresh");
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "included_usage",
+      "grok_bot",
+    ]);
+  });
+
+  it("keeps IDE windows when GetSandUsageStatus fails", async () => {
+    vi.doMock("../../src/lib/process.js", () => ({
+      commandExists: vi.fn(async () => true),
+      execFileText: vi.fn(async (_command: string, args: string[]) => {
+        const query = args.at(-1) ?? "";
+        if (query.includes("cursorAuth/accessToken")) return '"valid-token"';
+        return "";
+      }),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        if (String(url).includes("GetSandUsageStatus")) {
+          return new Response("{}", { status: 500 });
+        }
+        if (String(url).includes("GetPlanInfo")) {
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({ planUsage: { totalPercentUsed: 10 } }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    const { fetchQuota } = await import("../../src/providers/cursor.js");
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "included_usage",
+    ]);
+  });
+
+  it("reports grok_bot when GetCurrentPeriodUsage has no IDE windows", async () => {
+    vi.doMock("../../src/lib/process.js", () => ({
+      commandExists: vi.fn(async () => true),
+      execFileText: vi.fn(async (_command: string, args: string[]) => {
+        const query = args.at(-1) ?? "";
+        if (query.includes("cursorAuth/accessToken")) return '"valid-token"';
+        return "";
+      }),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        if (String(url).includes("GetSandUsageStatus")) {
+          return new Response(JSON.stringify({ usagePercent: 7 }), {
+            status: 200,
+          });
+        }
+        return new Response(JSON.stringify({ planUsage: {} }), { status: 200 });
+      }),
+    );
+
+    const { fetchQuota } = await import("../../src/providers/cursor.js");
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.windows).toMatchObject([
+      { id: "grok_bot", percentUsed: 7, percentRemaining: 93 },
+    ]);
+  });
+
+  it("fails the provider when GetCurrentPeriodUsage errors, even though GetSandUsageStatus succeeds", async () => {
+    vi.doMock("../../src/lib/process.js", () => ({
+      commandExists: vi.fn(async () => true),
+      execFileText: vi.fn(async (_command: string, args: string[]) => {
+        const query = args.at(-1) ?? "";
+        if (query.includes("cursorAuth/accessToken")) return '"valid-token"';
+        return "";
+      }),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        if (String(url).includes("GetCurrentPeriodUsage")) {
+          return new Response("{}", { status: 500 });
+        }
+        if (String(url).includes("GetSandUsageStatus")) {
+          return new Response(JSON.stringify({ usagePercent: 7 }), {
+            status: 200,
+          });
+        }
+        return new Response(JSON.stringify({ planInfo: {} }), {
+          status: 200,
+        });
+      }),
+    );
+
+    const { fetchQuota } = await import("../../src/providers/cursor.js");
+    const result = await fetchQuota({
+      allowKeychainPrompt: false,
+      refreshCredentials: false,
+    });
+
+    expect(result.state.status).not.toBe("fresh");
+    expect(result.windows).toEqual([]);
   });
 
   it("resolves the Linux state database under XDG config home", async () => {
@@ -167,6 +407,9 @@ describe("Cursor credential-state reporting", () => {
     const xdgConfigHome = join(tempDir!, "xdg-config");
     process.env.XDG_CONFIG_HOME = xdgConfigHome;
     process.env.HOME = join(tempDir!, "home");
+    const stateDir = join(xdgConfigHome, "Cursor", "User", "globalStorage");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "state.vscdb"), "");
     vi.doMock("../../src/lib/process.js", () => ({
       commandExists: vi.fn(async () => false),
       execFileText: vi.fn(),
@@ -174,7 +417,10 @@ describe("Cursor credential-state reporting", () => {
 
     await withPlatform("linux", async () => {
       const { inspectAuth } = await import("../../src/providers/cursor.js");
-      const result = await inspectAuth({ allowKeychainPrompt: false });
+      const result = await inspectAuth({
+        allowKeychainPrompt: false,
+        refreshCredentials: false,
+      });
 
       expect(result.sources).toContainEqual({
         source: "state-vscdb",
@@ -187,6 +433,7 @@ describe("Cursor credential-state reporting", () => {
         ),
         status: "skipped",
         error: "sqlite3_unavailable",
+        credentialPresent: true,
       });
     });
   });

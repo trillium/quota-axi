@@ -1,5 +1,6 @@
-// Generates skills/quota-axi/SKILL.md from the shared CLI guidance so the
-// installable skill never drifts from what `quota-axi` prints.
+// Generates skills/quota-axi/SKILL.md from src/skill.ts as a minimal stub that
+// defers to the live CLI. quota-axi CLI output is the single source of truth;
+// do not bake help text, output schema, or field semantics into the skill.
 //
 //   pnpm run build:skill            # write the file
 //   pnpm run build:skill -- --check # fail (exit 1) if the committed file is stale

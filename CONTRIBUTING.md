@@ -9,8 +9,18 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-The release and dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+For ordinary PRs targeting `main`, the `Require no-mistakes` workflow publishes the `PR must be raised via no-mistakes` check and fails if the body is missing the deterministic signature that no-mistakes writes. The enforcement itself lives in the shared [`require-no-mistakes`](https://github.com/kunchenguid/no-mistakes/tree/main/.github/actions/require-no-mistakes) composite action, which this repository calls at a pinned commit.
+
+The gate checks two things, not one: the human-readable signature, which proves the pipeline wrote the body, and the machine-readable `<!-- no-mistakes-pipeline-attestation:v1 {...} -->` comment written beside it, whose `steps[]` must record `review`, `test`, and `document` as `completed`. A step that was skipped (with `--skip`, at a gate, or because the agent was unavailable or out of quota), failed, or never finished is not accepted. Writing the attestation requires no-mistakes **v1.46.0** or newer; on an older version, run `no-mistakes update` and push again.
+
+The attestation is also bound to the commit it describes: its `head_sha` must equal the pull request's current head. Pushing a commit after the no-mistakes run leaves the body's attestation describing older code, so the gate goes red until you re-run `git push no-mistakes` to refresh it. That is the contract, not a false positive.
+
+The repository's `main` ruleset does not currently require this check, so the workflow is advisory and does not independently prevent merging.
+
+Two exemptions exist, and both are author exemptions on the gate job in [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml):
+
+- `dependabot[bot]`, so dependency updates keep flowing.
+- `github-actions[bot]`, which is how release-please opens its release PR.
 
 ## Workflow
 
@@ -33,8 +43,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Repo conventions
 
-- Node 20+, TypeScript, ESM-only.
+- Node 22.19+, TypeScript, ESM-only.
 - Install dependencies with `pnpm install --frozen-lockfile`; run `pnpm run build`, `pnpm run lint`, `pnpm run format:check`, `pnpm test`, and `pnpm run build:skill -- --check` before pushing.
+- `.no-mistakes.yaml` declares the gate's Test-step commands (`pnpm install --frozen-lockfile`, then `pnpm test`) instead of leaving the step to an agent that invents its own validation commands. Keep `pnpm test` non-watch and self-terminating. Its `test.instructions` runbook bounds the agent that still runs after that baseline to the deterministic suite plus only local, offline, self-terminating scenarios; do not widen it to live network, provider, or credential-refresh validation. `test/no-mistakes-config.test.ts` guards the declared commands, the terminating suite definition, and the trusted-copy configuration.
 - Run `pnpm run format` when `pnpm run format:check` reports formatting drift.
 - After changing dependencies, run `pnpm exec prettier --write pnpm-lock.yaml` so the committed lockfile keeps its Prettier formatting.
 - Do not hand-edit `CHANGELOG.md` or `.release-please-manifest.json`.
@@ -44,8 +55,16 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Do not change `release-please-config.json`'s `bootstrap-sha` for ordinary changes.
   It points at commit `9f5dc949c50ab8ac0a441be777e1c3693ee0b612`, the published npm `0.1.0` baseline.
 - Do not hand-edit `skills/quota-axi/SKILL.md`.
-  It is generated from the shared skill source, including frontmatter metadata; run `pnpm run build:skill` and commit the result.
-- quota-axi is data only: it must never route, recommend, proxy, intercept, log in, import browser cookies, or mutate provider state. Keep changes within that boundary.
+  It is generated from `src/skill.ts`, including frontmatter metadata; run `pnpm run build:skill` and commit the result.
+- Keep changes within the product and credential boundaries defined in [VISION.md](VISION.md); the user-facing safety contract lives in [README.md](README.md#safety-guarantees).
+
+## Release and gate maintenance
+
+Release-please cuts releases from conventional commits on `main`; merging its release PR triggers npm publication through `.github/workflows/release-please.yml` using OIDC trusted publishing (`id-token: write` and `--provenance`), not an `NPM_TOKEN` secret. The published `0.1.0` baseline is recorded by `bootstrap-sha` in `release-please-config.json`; do not retarget it unless correcting that baseline.
+
+Every `pull_request` workflow must `paths-ignore` release-please's output set (`.release-please-manifest.json`, `CHANGELOG.md`, `package.json`) except `.github/workflows/no-mistakes-required.yml`. The gate workflow must have no path filter because its verdict depends on the PR body, not changed files. `test/release-ci-exclusions.test.ts` checks both rules. That workflow calls the shared `kunchenguid/no-mistakes` composite action at an immutable commit SHA, never `@main`; change enforcement upstream and bump the pin in a separate PR. This repo owns the workflow's `on:`, `concurrency`, `permissions`, job name, and author-exemption `if:`.
+
+The trusted default-branch `.no-mistakes.yaml` leaves `allow_repo_commands` off so a pushed branch cannot supply executable `commands` or `agent`. See `test/no-mistakes-config.test.ts` for the configuration contract.
 
 ## Questions
 

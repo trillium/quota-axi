@@ -90,7 +90,9 @@ describe("Pi xAI credential broker", () => {
     await expect(broker.resolve()).resolves.toEqual({
       status: "expired",
       refreshable: true,
+      credential: "expired-access",
     });
+    // Inspection reports classification only, never the probe credential.
     await expect(broker.inspect()).resolves.toEqual({
       status: "expired",
       refreshable: true,
@@ -111,6 +113,7 @@ describe("Pi xAI credential broker", () => {
     await expect(broker.resolve()).resolves.toEqual({
       status: "expired",
       refreshable: false,
+      credential: "expired-access",
     });
   });
 
@@ -131,11 +134,12 @@ describe("Pi xAI credential broker", () => {
       await expect(broker.resolve()).resolves.toEqual({
         status: "expired",
         refreshable: false,
+        credential: "expired-access",
       });
     },
   );
 
-  it("classifies malformed JSON as a resolution error", async () => {
+  it("classifies malformed JSON as invalid", async () => {
     const home = temporaryDirectory();
     const authPath = join(home, ".pi", "agent", "auth.json");
     mkdirSync(dirname(authPath), { recursive: true });
@@ -145,10 +149,10 @@ describe("Pi xAI credential broker", () => {
       homeDirectory: () => home,
     });
 
-    await expect(broker.resolve()).resolves.toEqual({ status: "error" });
+    await expect(broker.resolve()).resolves.toEqual({ status: "invalid" });
     await expect(broker.inspect()).resolves.toEqual({
-      status: "error",
-      error: "credential_resolution_failed",
+      status: "invalid",
+      error: "invalid_credential",
     });
   });
 

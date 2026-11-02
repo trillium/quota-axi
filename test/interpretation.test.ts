@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { withQuotaSemantics } from "../src/interpretation.js";
-import type { ProviderQuota, QuotaWindow } from "../src/types.js";
+import { renderQuotaToon } from "../src/render.js";
+import {
+  SELECTION_SCALAR_KEY,
+  type ProviderQuota,
+  type QuotaWindow,
+} from "../src/types.js";
 
 const GENERATED_AT = "2026-07-15T12:00:00.000Z";
 const WEEK_SECONDS = 604_800;
@@ -41,6 +46,36 @@ function weeklyResetsAt(elapsedFraction: number): string {
   ).toISOString();
 }
 
+function offsetFromGeneratedAt(seconds: number): string {
+  return new Date(Date.parse(GENERATED_AT) + seconds * 1000).toISOString();
+}
+
+const MONTH_SECONDS = 30 * 24 * 60 * 60;
+
+/** Halfway through a five-hour cycle with 40% of the token budget left. */
+function zaiSessionWindow(): QuotaWindow {
+  return window("five_hour", "session", 40, {
+    windowSeconds: 18_000,
+    resetsAt: offsetFromGeneratedAt(9_000),
+  });
+}
+
+/** Halfway through the weekly cycle with 30% of the token budget left. */
+function zaiWeeklyWindow(): QuotaWindow {
+  return window("weekly", "weekly", 30, {
+    windowSeconds: WEEK_SECONDS,
+    resetsAt: offsetFromGeneratedAt(WEEK_SECONDS / 2),
+  });
+}
+
+/** A quarter into the MCP month with only 10% of the tool budget left. */
+function zaiToolWindow(): QuotaWindow {
+  return window("mcp_month", "monthly", 10, {
+    startsAt: offsetFromGeneratedAt(-MONTH_SECONDS * 0.25),
+    resetsAt: offsetFromGeneratedAt(MONTH_SECONDS * 0.75),
+  });
+}
+
 describe("quota semantics", () => {
   it("keeps every stale provider's effective availability unknown", () => {
     const cases: Array<[ProviderQuota["provider"], QuotaWindow[]]> = [
@@ -48,8 +83,11 @@ describe("quota semantics", () => {
       ["codex", [window("weekly", "weekly", 38)]],
       ["grok", [window("credits", "credits", 44)]],
       ["kimi", [window("weekly", "weekly", 59)]],
+      ["zai", [window("weekly", "weekly", 42)]],
+      ["agy", [window("gemini_weekly", "weekly", 98)]],
       ["cursor", [window("included_usage", "monthly", 72)]],
       ["copilot", [window("premium_interactions", "monthly", 81)]],
+      ["commandcode", [window("five_hour", "session", 55)]],
     ];
 
     for (const [providerId, windows] of cases) {
@@ -125,6 +163,29 @@ describe("quota semantics", () => {
     ).toBe(true);
   });
 
+  it("does not copy unproven account bounds into Alibaba model scopes", () => {
+    const result = withQuotaSemantics(
+      provider("alibaba", [
+        window("weekly", "weekly", 22),
+        window("model:qwen3-max", "model", 91),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        effectivePercentRemaining: 22,
+        boundedBy: ["weekly"],
+      }),
+      expect.objectContaining({
+        scope: "model:qwen3-max",
+        effectivePercentRemaining: 91,
+        boundedBy: ["model:qwen3-max"],
+      }),
+    ]);
+  });
+
   it("does not block Claude effective runway when five_hour has not been triggered yet (no resetsAt)", () => {
     const result = withQuotaSemantics(
       provider("claude", [
@@ -157,6 +218,220 @@ describe("quota semantics", () => {
     expect(fiveHour?.pace).toEqual({
       status: "unknown",
       reason: "missing_cycle",
+    });
+  });
+
+  it("does not block named-model runway when its fully available cycle has not opened yet", () => {
+    const result = withQuotaSemantics(
+      provider("claude", [
+        window("seven_day", "weekly", 90, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: weeklyResetsAt(0.5),
+        }),
+        window("model:fable", "model", 100, {
+          percentUsed: 0,
+          windowSeconds: WEEK_SECONDS,
+          // The provider has assigned the next full cycle, but its start is
+          // still just ahead of this report's snapshot clock.
+          resetsAt: offsetFromGeneratedAt(WEEK_SECONDS + 1),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    const availability = result.quotaSemantics?.effectiveAvailability ?? [];
+    expect(
+      availability.find(({ scope }) => scope === "all_models")?.runway,
+    ).toEqual({
+      status: "through_reset",
+      projectionConfidence: "established",
+    });
+    expect(result.windows.find(({ id }) => id === "model:fable")?.pace).toEqual(
+      { status: "unknown", reason: "future_cycle_start" },
+    );
+    expect(
+      availability.find(({ scope }) => scope === "model:fable")?.runway,
+    ).toEqual({
+      status: "through_reset",
+      projectionConfidence: "established",
+    });
+  });
+
+  it("does not promote a model's lower Alibaba limit into the account bound", () => {
+    const result = withQuotaSemantics(
+      provider("alibaba", [
+        window("weekly", "weekly", 80),
+        window("model:qwen3-max", "model", 3),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        effectivePercentRemaining: 80,
+        boundedBy: ["weekly"],
+      }),
+      expect.objectContaining({
+        scope: "model:qwen3-max",
+        effectivePercentRemaining: 3,
+        boundedBy: ["model:qwen3-max"],
+      }),
+    ]);
+  });
+
+  it("combines repeated Alibaba limits for the same model scope", () => {
+    const result = withQuotaSemantics(
+      provider("alibaba", [
+        window("weekly", "weekly", 80),
+        window("model:qwen3-max", "model", 80),
+        {
+          ...window("model:qwen3-max:2", "model", 20),
+          label: "model:qwen3-max",
+        },
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        effectivePercentRemaining: 80,
+        boundedBy: ["weekly"],
+      }),
+      expect.objectContaining({
+        scope: "model:qwen3-max",
+        effectivePercentRemaining: 20,
+        boundedBy: ["model:qwen3-max", "model:qwen3-max:2"],
+      }),
+    ]);
+  });
+
+  it("keeps model names containing colons in separate Alibaba scopes", () => {
+    const result = withQuotaSemantics(
+      provider("alibaba", [
+        window("weekly", "weekly", 80),
+        window("model:qwen:latest", "model", 11),
+        window("model:qwen:reasoning", "model", 22),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(
+      result.quotaSemantics?.effectiveAvailability.map(
+        ({ scope, effectivePercentRemaining }) => [
+          scope,
+          effectivePercentRemaining,
+        ],
+      ),
+    ).toEqual([
+      ["all_models", 80],
+      ["model:qwen:latest", 11],
+      ["model:qwen:reasoning", 22],
+    ]);
+  });
+
+  it("reports OpenCode Go with no windows as unknown, not partial with all caps unresolved", () => {
+    const result = withQuotaSemantics(
+      provider("opencode-go", []),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "unknown",
+      effectiveAvailability: [],
+      unresolvedWindowIds: [],
+    });
+  });
+
+  it("treats OpenCode Go rolling, weekly, and monthly windows as stacked plan caps", () => {
+    const result = withQuotaSemantics(
+      provider("opencode-go", [
+        window("rolling", "unknown", 90),
+        window("weekly", "weekly", 80),
+        window("monthly", "monthly", 70),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "known",
+      effectiveAvailability: [
+        {
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: 70,
+          boundedBy: ["rolling", "weekly", "monthly"],
+          limitingWindowIds: ["monthly"],
+        },
+      ],
+    });
+  });
+
+  it("keeps OpenCode Go effective unknown when a cap is missing", () => {
+    const result = withQuotaSemantics(
+      provider("opencode-go", [
+        window("weekly", "weekly", 80),
+        window("monthly", "monthly", 70),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "partial",
+      effectiveAvailability: [
+        {
+          scope: "all_models",
+          status: "unknown",
+          boundedBy: ["weekly", "monthly"],
+        },
+      ],
+      unresolvedWindowIds: ["rolling"],
+    });
+  });
+
+  it("treats a duration-confirmed rolling window as the rolling cap", () => {
+    const result = withQuotaSemantics(
+      provider("opencode-go", [
+        window("five_hour", "session", 90),
+        window("weekly", "weekly", 80),
+        window("monthly", "monthly", 70),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "known",
+      effectiveAvailability: [
+        {
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: 70,
+          limitingWindowIds: ["monthly"],
+        },
+      ],
+    });
+  });
+  it("keeps OpenCode Go effective unknown when an unfamiliar window appears", () => {
+    const result = withQuotaSemantics(
+      provider("opencode-go", [
+        window("weekly", "weekly", 80),
+        window("monthly", "monthly", 70),
+        window("credits", "unknown", 50),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics).toMatchObject({
+      status: "partial",
+      effectiveAvailability: [
+        {
+          scope: "all_models",
+          status: "unknown",
+          boundedBy: ["weekly", "monthly"],
+        },
+      ],
+      unresolvedWindowIds: ["credits", "rolling"],
     });
   });
 
@@ -232,7 +507,6 @@ describe("quota semantics", () => {
         limitingWindowId: "model:fable",
         usableRunwaySeconds: 50_400,
         projectionConfidence: "established",
-        projectionBasis: "cycle_average",
       },
     });
   });
@@ -266,6 +540,256 @@ describe("quota semantics", () => {
         limitingWindowIds: ["weekly"],
       }),
     );
+  });
+
+  it("reports a Codex bound conflict instead of exhaustion when a zeroed base window contradicts live model windows", () => {
+    const result = withQuotaSemantics(
+      provider("codex", [
+        window("five_hour", "session", 92, {
+          startsAt: GENERATED_AT,
+          resetsAt: offsetFromGeneratedAt(5 * 60 * 60),
+        }),
+        window("weekly", "weekly", 0, {
+          startsAt: offsetFromGeneratedAt(-4 * 24 * 60 * 60),
+          resetsAt: offsetFromGeneratedAt(3 * 24 * 60 * 60),
+        }),
+        window("model:codex_bengalfox:5h", "model", 92, {
+          startsAt: GENERATED_AT,
+          resetsAt: offsetFromGeneratedAt(5 * 60 * 60),
+        }),
+        window("model:codex_bengalfox:7d", "model", 96, {
+          startsAt: GENERATED_AT,
+          resetsAt: offsetFromGeneratedAt(7 * 24 * 60 * 60),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    const availability = result.quotaSemantics?.effectiveAvailability ?? [];
+    const model = availability.find(
+      (scope) => scope.scope === "model:codex_bengalfox",
+    );
+
+    expect(model).toMatchObject({
+      status: "unknown",
+      boundedBy: [
+        "five_hour",
+        "weekly",
+        "model:codex_bengalfox:5h",
+        "model:codex_bengalfox:7d",
+      ],
+      boundConflict: {
+        exhaustedWindowIds: ["weekly"],
+        liveWindowIds: ["model:codex_bengalfox:5h", "model:codex_bengalfox:7d"],
+      },
+    });
+    expect(model?.effectivePercentRemaining).toBeUndefined();
+    expect(model?.runway?.status).toBe("unknown");
+    expect(model?.selection?.status).toBe("unknown");
+
+    // The account's own meter really is exhausted, and still says so.
+    expect(availability).toContainEqual(
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 0,
+        runway: expect.objectContaining({
+          status: "exhausted_now",
+          limitingWindowId: "weekly",
+        }),
+      }),
+    );
+  });
+
+  it("keeps a Codex model exhausted when its own window is the zero", () => {
+    const result = withQuotaSemantics(
+      provider("codex", [
+        window("weekly", "weekly", 0, { resetsAt: weeklyResetsAt(0.5) }),
+        window("model:codex_bengalfox:5h", "model", 92, {
+          resetsAt: offsetFromGeneratedAt(9_000),
+        }),
+        window("model:codex_bengalfox:7d", "model", 0, {
+          resetsAt: weeklyResetsAt(0.5),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    const model = result.quotaSemantics?.effectiveAvailability.find(
+      (scope) => scope.scope === "model:codex_bengalfox",
+    );
+
+    expect(model).toMatchObject({
+      status: "known",
+      effectivePercentRemaining: 0,
+      runway: expect.objectContaining({ status: "exhausted_now" }),
+    });
+    expect(model?.boundConflict).toBeUndefined();
+  });
+
+  it("reports a Codex Business spend-control cap as a known all_models scope", () => {
+    const result = withQuotaSemantics(
+      provider("codex", [
+        window("spend_control", "credits", 99.85, {
+          resetsAt: "2026-11-01T00:00:00.000Z",
+          limitCredits: 72000,
+          usedCredits: 109.38,
+          remainingCredits: 71890.62,
+          creditUnit: "credit",
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.effectiveAvailability).toContainEqual(
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 99.85,
+        boundedBy: ["spend_control"],
+        limitingWindowIds: ["spend_control"],
+      }),
+    );
+    expect(
+      renderQuotaToon(
+        { generatedAt: GENERATED_AT, schemaVersion: 5, providers: [result] },
+        "quota-axi",
+        false,
+      ),
+    ).toContain("codex,all_models,99.85,");
+  });
+
+  it("marks a Codex Business spend-control cap exhausted when reached is true", () => {
+    const result = withQuotaSemantics(
+      provider("codex", [
+        window("spend_control", "credits", 0, {
+          resetsAt: "2026-11-01T00:00:00.000Z",
+          limitCredits: 72000,
+          usedCredits: 72000,
+          remainingCredits: 0,
+          creditUnit: "credit",
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability).toContainEqual(
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 0,
+      }),
+    );
+    expect(
+      renderQuotaToon(
+        { generatedAt: GENERATED_AT, schemaVersion: 5, providers: [result] },
+        "quota-axi",
+        false,
+      ),
+    ).toContain("exhaustion[1]");
+  });
+
+  it.each([99, 10, 0])(
+    "keeps included Codex headroom independent of a cap at %s%%",
+    (creditRemaining) => {
+      const result = withQuotaSemantics(
+        provider("codex", [
+          window("five_hour", "session", 80, {
+            resetsAt: offsetFromGeneratedAt(9_000),
+          }),
+          window("spend_control", "credits", creditRemaining, {
+            resetsAt: "2026-11-01T00:00:00.000Z",
+          }),
+        ]),
+        GENERATED_AT,
+      );
+
+      expect(result.quotaSemantics?.status).toBe("known");
+      const all = result.quotaSemantics?.effectiveAvailability.find(
+        (s) => s.scope === "all_models",
+      );
+      expect(all).toMatchObject({
+        status: "known",
+        effectivePercentRemaining: 80,
+        boundedBy: ["five_hour"],
+        limitingWindowIds: ["five_hour"],
+      });
+      expect(result.windows.map(({ id }) => id)).toEqual([
+        "five_hour",
+        "spend_control",
+      ]);
+      const report = renderQuotaToon(
+        { generatedAt: GENERATED_AT, schemaVersion: 5, providers: [result] },
+        "quota-axi",
+        false,
+      );
+      expect(report).toContain("codex,all_models,80,");
+      expect(report).toContain("exhaustion[0]:");
+    },
+  );
+
+  it("does not inherit a reached credit cap into named or code-review limits", () => {
+    const result = withQuotaSemantics(
+      provider("codex", [
+        window("model:preview:5h", "model", 60),
+        window("code_review_weekly", "weekly", 70),
+        window("spend_control", "credits", 0),
+      ]),
+      GENERATED_AT,
+    );
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.effectiveAvailability).toMatchObject([
+      {
+        scope: "code_review",
+        effectivePercentRemaining: 70,
+        boundedBy: ["code_review_weekly"],
+      },
+      {
+        scope: "model:preview",
+        effectivePercentRemaining: 60,
+        boundedBy: ["model:preview:5h"],
+      },
+    ]);
+  });
+
+  // The bound conflict is opted into per provider. Claude's account 5h/7d bound
+  // is enforced across models, so the same reading shape must still resolve to
+  // the account's zero rather than degrading a correct verdict into `unknown`.
+  it("keeps a Claude model exhausted when the account window it inherits reads zero", () => {
+    const result = withQuotaSemantics(
+      provider("claude", [
+        window("five_hour", "session", 88, {
+          windowSeconds: 18_000,
+          resetsAt: offsetFromGeneratedAt(9_000),
+        }),
+        window("seven_day", "weekly", 0, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: offsetFromGeneratedAt(WEEK_SECONDS / 2),
+        }),
+        window("model:fable", "model", 74, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: offsetFromGeneratedAt(WEEK_SECONDS / 2),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    const model = result.quotaSemantics?.effectiveAvailability.find(
+      (scope) => scope.scope === "model:fable",
+    );
+
+    expect(model).toMatchObject({
+      status: "known",
+      effectivePercentRemaining: 0,
+      boundedBy: ["five_hour", "seven_day", "model:fable"],
+      limitingWindowIds: ["seven_day"],
+      runway: expect.objectContaining({
+        status: "exhausted_now",
+        limitingWindowId: "seven_day",
+      }),
+    });
+    expect(model?.boundConflict).toBeUndefined();
   });
 
   it("marks unfamiliar Codex windows partial instead of ignoring them", () => {
@@ -305,6 +829,75 @@ describe("quota semantics", () => {
     ]);
   });
 
+  it("bounds Kimi by its account windows and never by the monthly code share", () => {
+    const monthCode: QuotaWindow = {
+      id: "month_code",
+      label: "code month",
+      kind: "monthly",
+      percentUsed: 25,
+      shareOf: "month_total",
+    };
+    const result = withQuotaSemantics(
+      provider("kimi", [
+        window("five_hour", "session", 50),
+        window("month_total", "monthly", 60),
+        monthCode,
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toBeUndefined();
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 50,
+        boundedBy: ["five_hour", "month_total"],
+        limitingWindowIds: ["five_hour"],
+      }),
+    ]);
+  });
+
+  it("recognizes any Kimi window marked as a used-share without bounding by it", () => {
+    const result = withQuotaSemantics(
+      provider("kimi", [
+        window("weekly", "weekly", 59),
+        {
+          id: "future_share",
+          label: "future share",
+          kind: "monthly",
+          percentUsed: 10,
+          shareOf: "weekly",
+        },
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toBeUndefined();
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        boundedBy: ["weekly"],
+        effectivePercentRemaining: 59,
+      }),
+    ]);
+  });
+
+  it("treats a Kimi month_code window without a share marker as unresolved", () => {
+    const result = withQuotaSemantics(
+      provider("kimi", [
+        window("weekly", "weekly", 59),
+        window("month_code", "monthly", 75),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual(["month_code"]);
+  });
+
   it("keeps valid Kimi bounds while marking unparsed limits partial", () => {
     const kimi = provider("kimi", [window("weekly", "weekly", 59)]);
     kimi.state.untrustedWindowIds = ["limit:2"];
@@ -314,7 +907,7 @@ describe("quota semantics", () => {
     expect(result.quotaSemantics).toEqual({
       status: "partial",
       description:
-        "Kimi's valid weekly and five-hour account windows are known bounds, but unrecognized or unparsed limits may add bounds, so effective remaining is unknown.",
+        "Kimi's valid weekly, five-hour, and monthly-total account windows are known bounds, but unrecognized or unparsed limits may add bounds, so effective remaining is unknown. The monthly code window is the code-typed share of that monthly total rather than a separate allowance, so it adds no bound.",
       effectiveAvailability: [
         {
           scope: "all_models",
@@ -328,10 +921,140 @@ describe("quota semantics", () => {
             status: "unknown",
             unmeasurableWindowIds: ["weekly", "limit:2"],
           },
+          selection: {
+            status: "unknown",
+            unmeasurableWindowIds: ["weekly", "limit:2"],
+          },
         },
       ],
       unresolvedWindowIds: ["limit:2"],
     });
+  });
+
+  it("reports Z.AI token and tool headroom as separate resources", () => {
+    const result = withQuotaSemantics(
+      provider("zai", [zaiSessionWindow(), zaiWeeklyWindow(), zaiToolWindow()]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 30,
+        boundedBy: ["five_hour", "weekly"],
+        limitingWindowIds: ["weekly"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          aheadWindowIds: ["five_hour", "weekly"],
+          worstReserveWindowId: "weekly",
+          worstReservePercentPoints: -20,
+        }),
+      }),
+      expect.objectContaining({
+        scope: "tools",
+        status: "known",
+        effectivePercentRemaining: 10,
+        boundedBy: ["mcp_month"],
+        limitingWindowIds: ["mcp_month"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          worstReserveWindowId: "mcp_month",
+          worstReservePercentPoints: -65,
+        }),
+      }),
+    ]);
+  });
+
+  it("ranks the Z.AI all-models scope when an idle five-hour window has not been triggered yet", () => {
+    const result = withQuotaSemantics(
+      provider("zai", [
+        window("five_hour", "session", 100, {
+          percentUsed: 0,
+          windowSeconds: 18_000,
+          // No resetsAt: the vendor omits nextResetTime while the session
+          // window is idle, so the 5h clock has not started. This must not
+          // block spendPriority.
+        }),
+        window("weekly", "weekly", 51, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: weeklyResetsAt(0.6),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    const allModels = result.quotaSemantics?.effectiveAvailability.find(
+      (item) => item.scope === "all_models",
+    );
+    expect(allModels?.status).toBe("known");
+    expect(allModels?.selection?.status).toBe("known");
+    expect(allModels?.selection?.unmeasurableWindowIds).toBeUndefined();
+    expect(typeof allModels?.selection?.[SELECTION_SCALAR_KEY]).toBe("number");
+
+    const fiveHour = result.windows.find((item) => item.id === "five_hour");
+    expect(fiveHour?.pace).toEqual({
+      status: "unknown",
+      reason: "missing_cycle",
+    });
+  });
+
+  it("keeps the Z.AI tool window out of the all-models bound when limits are unresolved", () => {
+    const zai = provider("zai", [
+      zaiSessionWindow(),
+      zaiWeeklyWindow(),
+      zaiToolWindow(),
+      window("limit:3", "unknown", 50),
+    ]);
+    zai.state.untrustedWindowIds = ["limit:3", "limit:4"];
+
+    const result = withQuotaSemantics(zai, GENERATED_AT);
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual([
+      "limit:3",
+      "limit:4",
+    ]);
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      {
+        scope: "all_models",
+        status: "unknown",
+        boundedBy: ["five_hour", "weekly"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          aheadWindowIds: ["five_hour", "weekly"],
+          worstReserveWindowId: "weekly",
+          worstReservePercentPoints: -20,
+        }),
+        runway: {
+          status: "unknown",
+          unmeasurableWindowIds: ["five_hour", "weekly", "limit:3", "limit:4"],
+        },
+        selection: {
+          status: "unknown",
+          unmeasurableWindowIds: ["five_hour", "weekly", "limit:3", "limit:4"],
+        },
+      },
+      {
+        scope: "tools",
+        status: "unknown",
+        boundedBy: ["mcp_month"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          worstReserveWindowId: "mcp_month",
+          worstReservePercentPoints: -65,
+        }),
+        runway: {
+          status: "unknown",
+          unmeasurableWindowIds: ["mcp_month", "limit:3", "limit:4"],
+        },
+        selection: {
+          status: "unknown",
+          unmeasurableWindowIds: ["mcp_month", "limit:3", "limit:4"],
+        },
+      },
+    ]);
   });
 
   it("applies Grok shared credits to product windows", () => {
@@ -355,14 +1078,131 @@ describe("quota semantics", () => {
   });
 
   it("labels unknown and unfamiliar relationships instead of inventing an answer", () => {
-    const cursor = withQuotaSemantics(
-      provider("cursor", [window("included_usage", "monthly", 100)]),
+    const copilot = withQuotaSemantics(
+      provider("copilot", [window("premium_interactions", "monthly", 100)]),
       GENERATED_AT,
     );
-    expect(cursor.quotaSemantics).toMatchObject({
+    expect(copilot.quotaSemantics).toMatchObject({
       status: "unknown",
       effectiveAvailability: [],
-      unresolvedWindowIds: ["included_usage"],
+      unresolvedWindowIds: ["premium_interactions"],
+    });
+
+    const agy = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 100),
+        window("gemini_weekly", "weekly", 0),
+        window("claude_gpt_5h", "session", 100),
+        window("claude_gpt_weekly", "weekly", 90),
+      ]),
+      GENERATED_AT,
+    );
+    expect(agy.quotaSemantics).toMatchObject({
+      status: "known",
+      effectiveAvailability: [
+        expect.objectContaining({
+          scope: "gemini",
+          status: "known",
+          effectivePercentRemaining: 0,
+          boundedBy: ["gemini_5h", "gemini_weekly"],
+          limitingWindowIds: ["gemini_weekly"],
+        }),
+        expect.objectContaining({
+          scope: "claude_gpt",
+          status: "known",
+          effectivePercentRemaining: 90,
+          boundedBy: ["claude_gpt_5h", "claude_gpt_weekly"],
+          limitingWindowIds: ["claude_gpt_weekly"],
+        }),
+      ],
+    });
+    expect(agy.quotaSemantics?.unresolvedWindowIds).toBeUndefined();
+
+    const fiveHoursResetsAt = (elapsedFraction: number) =>
+      new Date(
+        Date.parse(GENERATED_AT) + 18_000 * (1 - elapsedFraction) * 1000,
+      ).toISOString();
+    const agyMeasured = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 95, {
+          windowSeconds: 18_000,
+          resetsAt: fiveHoursResetsAt(0.5),
+        }),
+        window("gemini_weekly", "weekly", 99, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: weeklyResetsAt(0.5),
+        }),
+        window("claude_gpt_5h", "session", 100, {
+          windowSeconds: 18_000,
+          resetsAt: fiveHoursResetsAt(0),
+        }),
+        window("claude_gpt_weekly", "weekly", 100, {
+          windowSeconds: WEEK_SECONDS,
+          resetsAt: weeklyResetsAt(0),
+        }),
+      ]),
+      GENERATED_AT,
+    );
+    for (const scope of ["gemini", "claude_gpt"]) {
+      const group = agyMeasured.quotaSemantics?.effectiveAvailability.find(
+        (item) => item.scope === scope,
+      );
+      expect(group?.selection?.status).toBe("known");
+      expect(typeof group?.selection?.[SELECTION_SCALAR_KEY]).toBe("number");
+      expect(group?.runway?.status).toBe("through_reset");
+    }
+
+    const agyWeeklyOnly = withQuotaSemantics(
+      provider("agy", [window("gemini_weekly", "weekly", 40)]),
+      GENERATED_AT,
+    );
+    expect(agyWeeklyOnly.quotaSemantics).toMatchObject({
+      status: "known",
+      effectiveAvailability: [
+        expect.objectContaining({
+          scope: "gemini",
+          effectivePercentRemaining: 40,
+          boundedBy: ["gemini_weekly"],
+        }),
+      ],
+    });
+
+    const agyUnfamiliar = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_weekly", "weekly", 40),
+        window("limit:extra", "unknown", 80),
+      ]),
+      GENERATED_AT,
+    );
+    expect(agyUnfamiliar.quotaSemantics).toMatchObject({
+      status: "partial",
+      unresolvedWindowIds: ["limit:extra"],
+      effectiveAvailability: [
+        expect.objectContaining({
+          scope: "gemini",
+          effectivePercentRemaining: 40,
+        }),
+      ],
+    });
+
+    const agyUnknownKind = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 100),
+        window("gemini_weekly", "weekly", 70),
+        window("gemini_unknown", "unknown", 10),
+      ]),
+      GENERATED_AT,
+    );
+    expect(agyUnknownKind.quotaSemantics).toMatchObject({
+      status: "partial",
+      unresolvedWindowIds: ["gemini_unknown"],
+      effectiveAvailability: [
+        expect.objectContaining({
+          scope: "gemini",
+          effectivePercentRemaining: 70,
+          boundedBy: ["gemini_5h", "gemini_weekly"],
+        }),
+      ],
     });
 
     const kimi = withQuotaSemantics(
@@ -383,6 +1223,168 @@ describe("quota semantics", () => {
       ],
       unresolvedWindowIds: ["limit:2"],
     });
+  });
+
+  it("bounds Cursor by its lowest recognized window across all models", () => {
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        window("included_usage", "monthly", 58),
+        window("auto_usage", "monthly", 88),
+        window("api_usage", "monthly", 21),
+        window("spend_limit", "credits", 40),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toBeUndefined();
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 21,
+        boundedBy: ["included_usage", "auto_usage", "api_usage", "spend_limit"],
+        limitingWindowIds: ["api_usage"],
+      }),
+    ]);
+  });
+
+  it("bounds Cursor on the recognized windows it actually reports", () => {
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        window("included_usage", "monthly", 58),
+        window("auto_usage", "monthly", 88),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability[0]).toMatchObject({
+      scope: "all_models",
+      status: "known",
+      effectivePercentRemaining: 58,
+      boundedBy: ["included_usage", "auto_usage"],
+      limitingWindowIds: ["included_usage"],
+    });
+  });
+
+  it("keeps an unfamiliar Cursor window unresolved and out of the bound", () => {
+    const recognized = [
+      window("included_usage", "monthly", 58),
+      window("auto_usage", "monthly", 88),
+      window("api_usage", "monthly", 21),
+    ];
+    const withoutUnfamiliar = withQuotaSemantics(
+      provider("cursor", recognized),
+      GENERATED_AT,
+    );
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        ...recognized,
+        window("mystery_limit", "unknown", 3),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual([
+      "mystery_limit",
+    ]);
+    // The unfamiliar window is the lowest of all, so folding it in would move
+    // the bound; the recognized-only minimum must survive untouched.
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual(
+      withoutUnfamiliar.quotaSemantics?.effectiveAvailability,
+    );
+    expect(
+      result.quotaSemantics?.effectiveAvailability[0]
+        ?.effectivePercentRemaining,
+    ).toBe(21);
+  });
+
+  it("keeps Cursor Grok Bot weekly usage as a separate scope", () => {
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        window("included_usage", "monthly", 58),
+        window("auto_usage", "monthly", 88),
+        window("grok_bot", "weekly", 20, {
+          startsAt: "2026-08-19T21:37:33.239Z",
+          resetsAt: "2026-08-26T21:37:33.239Z",
+        }),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toBeUndefined();
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 58,
+        boundedBy: ["included_usage", "auto_usage"],
+        limitingWindowIds: ["included_usage"],
+      }),
+      expect.objectContaining({
+        scope: "grok_bot",
+        status: "known",
+        effectivePercentRemaining: 20,
+        boundedBy: ["grok_bot"],
+        limitingWindowIds: ["grok_bot"],
+      }),
+    ]);
+  });
+
+  it("does not fold Cursor Grok Bot usage into the IDE bound when a window is unfamiliar", () => {
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        window("included_usage", "monthly", 58),
+        window("grok_bot", "weekly", 4),
+        window("mystery_limit", "unknown", 3),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual([
+      "mystery_limit",
+    ]);
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 58,
+        boundedBy: ["included_usage"],
+      }),
+      expect.objectContaining({
+        scope: "grok_bot",
+        status: "known",
+        effectivePercentRemaining: 4,
+        boundedBy: ["grok_bot"],
+      }),
+    ]);
+  });
+
+  it("does not fabricate a Cursor bound from an unmeasured window", () => {
+    const result = withQuotaSemantics(
+      provider("cursor", [
+        window("included_usage", "monthly", 58),
+        {
+          id: "spend_limit",
+          label: "spend limit",
+          kind: "credits",
+          limitUsd: 20,
+        },
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability[0]).toMatchObject({
+      scope: "all_models",
+      status: "unknown",
+      boundedBy: ["included_usage", "spend_limit"],
+    });
+    expect(result.quotaSemantics?.effectiveAvailability[0]).not.toHaveProperty(
+      "effectivePercentRemaining",
+    );
   });
 
   it("still fails Claude effective runway closed when a triggered window's reset already expired", () => {
@@ -432,6 +1434,166 @@ describe("quota semantics", () => {
     expect(serialized).not.toMatch(/recommend|prefer|switch to|route to/i);
     expect(result.quotaSemantics?.description).not.toMatch(
       /recommend|prefer|switch|route/i,
+    );
+  });
+});
+
+describe("per-scope selection signal", () => {
+  const HOUR_SECONDS = 3_600;
+  const FIVE_HOURS_SECONDS = 18_000;
+  const DAY_SECONDS = 86_400;
+
+  function after(seconds: number): string {
+    return new Date(Date.parse(GENERATED_AT) + seconds * 1000).toISOString();
+  }
+
+  function before(seconds: number): string {
+    return after(-seconds);
+  }
+
+  function scopes(provider: ProviderQuota): Map<string, number | undefined> {
+    const semantics = withQuotaSemantics(provider, GENERATED_AT).quotaSemantics;
+    return new Map(
+      (semantics?.effectiveAvailability ?? []).map((availability) => [
+        availability.scope,
+        availability.selection?.[SELECTION_SCALAR_KEY],
+      ]),
+    );
+  }
+
+  // Claude is under-consuming both account windows; Cursor is tracking its
+  // billing cycle almost exactly; Codex is nearly empty and well ahead of pace.
+  const claude = provider("claude", [
+    window("five_hour", "session", 90, {
+      windowSeconds: FIVE_HOURS_SECONDS,
+      resetsAt: after(3 * HOUR_SECONDS),
+    }),
+    window("seven_day", "weekly", 80, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(5 * DAY_SECONDS),
+    }),
+    window("model:fable", "model", 95, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(5 * DAY_SECONDS),
+    }),
+  ]);
+  const cursor = provider("cursor", [
+    window("included_usage", "monthly", 35, {
+      startsAt: before(20 * DAY_SECONDS),
+      resetsAt: after(10 * DAY_SECONDS),
+    }),
+  ]);
+  const codex = provider("codex", [
+    window("five_hour", "session", 5, {
+      windowSeconds: FIVE_HOURS_SECONDS,
+      resetsAt: after(4 * HOUR_SECONDS),
+    }),
+    window("weekly", "weekly", 10, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(6 * DAY_SECONDS),
+    }),
+  ]);
+
+  it("scores an under-consuming subscription above a fully-utilized one", () => {
+    const claudeAllModels = scopes(claude).get("all_models");
+    const cursorAllModels = scopes(cursor).get("all_models");
+
+    expect(claudeAllModels).toBeCloseTo(0.444, 3);
+    expect(cursorAllModels).toBeCloseTo(0.075, 3);
+    expect(claudeAllModels!).toBeGreaterThan(0);
+    expect(claudeAllModels!).toBeGreaterThan(cursorAllModels!);
+  });
+
+  it("scores the least-consumed model scope highest within a provider", () => {
+    const claudeScopes = scopes(claude);
+    const fable = claudeScopes.get("model:fable");
+
+    expect(fable).toBeCloseTo(0.794, 3);
+    for (const [scope, value] of claudeScopes) {
+      if (scope === "model:fable") continue;
+      expect(fable!).toBeGreaterThan(value!);
+    }
+  });
+
+  it("scores a near-empty provider that is ahead of pace negative", () => {
+    const codexAllModels = scopes(codex).get("all_models");
+
+    expect(codexAllModels).toBeCloseTo(-6.14, 2);
+    expect(codexAllModels!).toBeLessThan(0);
+    expect(codexAllModels!).toBeLessThan(scopes(cursor).get("all_models")!);
+  });
+
+  it("keeps every stale scope's selection unknown with its bounds named", () => {
+    const stale: ProviderQuota = {
+      ...claude,
+      state: {
+        status: "stale",
+        stale: true,
+        refreshedAt: "2026-07-06T18:10:00Z",
+        sourcesTried: ["api"],
+      },
+    };
+
+    for (const availability of withQuotaSemantics(stale, GENERATED_AT)
+      .quotaSemantics!.effectiveAvailability) {
+      expect(availability.selection).toEqual({
+        status: "unknown",
+        unmeasurableWindowIds: availability.boundedBy,
+      });
+    }
+  });
+
+  it("makes a scope unmeasurable when a bounding window has no known pace", () => {
+    const missingCycle = provider("claude", [
+      window("five_hour", "session", 90, {
+        windowSeconds: FIVE_HOURS_SECONDS,
+        resetsAt: after(3 * HOUR_SECONDS),
+      }),
+      window("seven_day", "weekly", 80),
+    ]);
+
+    expect(
+      withQuotaSemantics(missingCycle, GENERATED_AT).quotaSemantics
+        ?.effectiveAvailability[0]?.selection,
+    ).toEqual({ status: "unknown", unmeasurableWindowIds: ["seven_day"] });
+  });
+
+  it("marks agy reading stale when its resetsAt is in the past relative to generatedAt", () => {
+    const agy = provider("agy", [
+      window("gemini_5h", "session", 90, {
+        windowSeconds: FIVE_HOURS_SECONDS,
+        resetsAt: new Date(Date.parse(GENERATED_AT) - 1_000).toISOString(),
+      }),
+      window("gemini_weekly", "weekly", 80, {
+        windowSeconds: WEEK_SECONDS,
+        resetsAt: after(3 * DAY_SECONDS),
+      }),
+    ]);
+
+    const result = withQuotaSemantics(agy, GENERATED_AT);
+    expect(result.state.status).toBe("stale");
+    expect(result.state.stale).toBe(true);
+    expect(result.quotaSemantics?.status).toBe("unknown");
+  });
+
+  it("bounds Higgsfield credits at included_credits and does not invent a model lane", () => {
+    const result = withQuotaSemantics(
+      provider("higgsfield", [window("credits", "credits", 99)]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "included_credits",
+        status: "known",
+        effectivePercentRemaining: 99,
+        boundedBy: ["credits"],
+      }),
+    ]);
+    expect(result.quotaSemantics?.effectiveAvailability).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scope: "all_models" }),
+      ]),
     );
   });
 });
