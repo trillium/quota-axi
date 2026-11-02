@@ -120,7 +120,7 @@ describe("CLI flag parsing", () => {
       "muse",
       "higgsfield",
       "bigpickle",
-      "anthropic_api",
+      "anthropic-api",
     ]);
   });
 
@@ -198,7 +198,7 @@ describe("CLI flag parsing", () => {
           "muse",
           "higgsfield",
           "bigpickle",
-          "anthropic_api",
+          "anthropic-api",
         ],
         json: true,
         full: true,
@@ -1508,7 +1508,7 @@ describe("human report folding for providers that are not set up", () => {
     expect(output.trimEnd().split("\n").slice(-3)).toEqual([
       "  ○ not set up  cursor · copilot · grok · kimi · zai · agy · alibaba · opencode-go · commandcode",
       "                minimax · mimo · deepseek · openrouter · elevenlabs · devin · muse · higgsfield",
-      "                bigpickle · anthropic_api   quota-axi auth shows where each is read",
+      "                bigpickle · anthropic-api   quota-axi auth shows where each is read",
     ]);
     expect(output).not.toMatch(/╭─ ○ (agy|alibaba|commandcode) /);
 
@@ -2220,8 +2220,8 @@ describe("default TOON decision blocks", () => {
     PROVIDERS.bigpickle = providerWithQuota(
       emptyFreshQuota("bigpickle", "Big Pickle"),
     );
-    PROVIDERS.anthropic_api = providerWithQuota(
-      emptyFreshQuota("anthropic_api", "Anthropic API credits"),
+    PROVIDERS["anthropic-api"] = providerWithQuota(
+      emptyFreshQuota("anthropic-api", "Anthropic API credits"),
     );
 
     const output = await capture([]);
@@ -2233,7 +2233,7 @@ describe("default TOON decision blocks", () => {
     expect([...named].sort()).toEqual([
       "agy",
       "alibaba",
-      "anthropic_api",
+      "anthropic-api",
       "bigpickle",
       "claude",
       "codex",

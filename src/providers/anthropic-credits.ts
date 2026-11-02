@@ -61,7 +61,7 @@ export function createAnthropicCreditsAdapter(
     ...overrides,
   };
   return {
-    id: "anthropic_api",
+    id: "anthropic-api",
     label: "Anthropic API credits",
     fetchQuota: async (_options: ProviderOptions) => fetchQuota(dependencies),
     inspectAuth: async (_options: ProviderOptions) => inspectAuth(dependencies),
@@ -110,7 +110,7 @@ function fetchQuota(dependencies: CreditsDependencies): ProviderQuota {
     0,
   );
   return {
-    provider: "anthropic_api",
+    provider: "anthropic-api",
     label: "Anthropic API credits",
     source: "local",
     windows,
@@ -146,7 +146,7 @@ function inspectAuth(dependencies: CreditsDependencies): AuthProviderReport {
             path,
             status: parseDeclaredCredits(read.value) ? "available" : "missing",
           };
-  return { provider: "anthropic_api", sources: [source] };
+  return { provider: "anthropic-api", sources: [source] };
 }
 
 /**
@@ -218,7 +218,7 @@ export function parseDeclaredCredits(
 
 function unavailable(error: string, attempts: SourceAttempt[]): ProviderQuota {
   return failedProvider({
-    provider: "anthropic_api",
+    provider: "anthropic-api",
     label: "Anthropic API credits",
     status: "unavailable",
     error,

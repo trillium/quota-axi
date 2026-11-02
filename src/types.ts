@@ -19,7 +19,7 @@ export type ProviderId =
   | "muse"
   | "higgsfield"
   | "bigpickle"
-  | "anthropic_api";
+  | "anthropic-api";
 
 export const PROVIDER_IDS = [
   "claude",
@@ -42,7 +42,7 @@ export const PROVIDER_IDS = [
   "muse",
   "higgsfield",
   "bigpickle",
-  "anthropic_api",
+  "anthropic-api",
 ] as const satisfies readonly ProviderId[];
 
 export type ProviderSource =

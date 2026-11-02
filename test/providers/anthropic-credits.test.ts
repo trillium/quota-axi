@@ -62,7 +62,7 @@ describe("anthropic credits provider", () => {
     const report = await adapterFor(declared).fetchQuota(options);
 
     expect(report).toMatchObject({
-      provider: "anthropic_api",
+      provider: "anthropic-api",
       source: "local",
       credits: { remaining: 228.69, unit: "usd" },
       declared: { basis: "declared", asOf: "2026-11-02", stale: false },
@@ -216,7 +216,7 @@ describe("anthropic credits provider", () => {
     const adapter = adapterFor(declared);
     const auth = await adapter.inspectAuth(options);
     expect(auth).toMatchObject({
-      provider: "anthropic_api",
+      provider: "anthropic-api",
       sources: [{ source: "config:credits", status: "available" }],
     });
   });
