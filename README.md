@@ -499,6 +499,13 @@ QUOTA_AXI_CLAUDE_PROFILES="$HOME/.claude-work:$HOME/.claude-team" quota-axi --pr
 - The `--tui` report can name each lane by its config directory or account key with `tui.accountLabels` ([Human terminal report](#human-terminal-report---tui)); agent output keeps only the account key.
 - `--profile-only` ignores the variable and keeps reading exactly one file.
 
+### Claude setup-token accounts
+
+Every `*.token` file in `~/.config/claude-tokens/` (override the directory with an absolute `QUOTA_AXI_CLAUDE_TOKEN_DIR`) becomes its own Claude lane beside the ordinary login, so a dispatcher can tell which `claude setup-token` credential has headroom. With no such file Claude behaves exactly as before. The lane key is `token:` plus 24 hexadecimal characters of a one-way digest of the file name (usually the account email), so it survives token rotation and holds nothing from the token. `--full` names the file in `accountLocator` (`kind: token-file`).
+
+- A setup token is inference-scoped, so the usage endpoint normally answers 403 (`user:profile` scope missing). That lane is reported present but unmeasured: `unavailable`, `claude_env_usage_scope_unavailable`, auth usable, no windows. quota-axi never invents a figure and does not run `claude` inference for these lanes. A token that does carry the scope reports real windows.
+- The token goes only into the request's `Authorization` header. It is never cached, refreshed, rendered, or logged; an empty file reports `claude_token_file_empty` with no request.
+
 ### claude-swap accounts
 
 `QUOTA_AXI_CLAUDE_SWAP=1` (or `true`) is an opt-in for people who run the third-party [claude-swap](https://github.com/realiti4/claude-swap) to hold several Claude accounts. Instead of reading Claude's own stores, quota-axi then runs claude-swap's non-interactive `cswap list --json` (fixed argv, resolved on `PATH`) and reports one lane per account it lists. Only the real executable is launched directly; a Windows `.cmd` or `.bat` launcher is reported as `claude_swap_unavailable` with `remedyCommand: pipx install claude-swap`, and can instead be replaced by the `cswap.exe` installed through uv. Unset or any value other than `1` or `true`, Claude behaves exactly as it does without the variable and `cswap` never runs.
