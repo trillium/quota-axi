@@ -26,6 +26,10 @@ import {
   claudeProfileLocations,
 } from "../lib/claude-profile.js";
 import {
+  discoverClaudeTokenFiles,
+  type ClaudeTokenFile,
+} from "./claude-token-lanes.js";
+import {
   claudeAccountKey,
   discoverClaudeProfiles,
   type ClaudeProfile,
@@ -227,6 +231,106 @@ async function discoverClaudeAccounts(
   options?: ProviderOptions,
   operation?: "quota" | "auth",
 ): Promise<ProviderAccount[] | undefined> {
+  const tokens = discoverClaudeTokenFiles();
+  if (tokens.length === 0)
+    return discoverClaudeLoginAccounts(options, operation);
+  // Setup-token files expand the report: each is its own lane beside the logins
+  const logins = await discoverClaudeLoginAccounts(options, operation, true);
+  if (!logins) return undefined;
+  return [...logins, ...tokens.map(claudeTokenAccount)];
+}
+
+/** One setup-token file as its own lane; see {@link fetchClaudeTokenQuota}. */
+function claudeTokenAccount(file: ClaudeTokenFile): ProviderAccount {
+  return {
+    accountKey: file.accountKey,
+    locator: { kind: "token-file", path: file.path, delegateEligible: false },
+    fetchQuota: () => fetchClaudeTokenQuota(file),
+    inspectAuth: async () => ({
+      provider: "claude",
+      sources: [
+        file.read()
+          ? { source: "token-file", path: file.path, status: "available" }
+          : {
+              source: "token-file",
+              path: file.path,
+              status: "invalid",
+            },
+      ],
+    }),
+  };
+}
+
+/**
+ * A setup token (`claude setup-token`) is an inference-only bearer: the usage
+ * endpoint normally answers 403 for its missing `user:profile` scope, exactly
+ * as for `CLAUDE_CODE_OAUTH_TOKEN`. That is reported as present-but-unmeasured
+ * (`claude_env_usage_scope_unavailable`, auth usable) with no windows, never a
+ * made-up figure. A token that does carry the scope reports real windows. The
+ * token value goes only into the Authorization header and is never cached,
+ * refreshed, rendered, or logged.
+ */
+async function fetchClaudeTokenQuota(
+  file: ClaudeTokenFile,
+): Promise<ProviderQuota> {
+  const accessToken = file.read();
+  const attempt = (status: "failed" | "success", error?: string) =>
+    [
+      {
+        source: "token-file",
+        status,
+        ...(error ? { error } : {}),
+      },
+    ] as SourceAttempt[];
+  if (!accessToken) {
+    return failedProvider({
+      provider: "claude",
+      label: "Claude",
+      status: "unavailable",
+      error: "claude_token_file_empty",
+      sourcesTried: ["token-file"],
+      attempts: attempt("failed", "claude_token_file_empty"),
+    });
+  }
+  try {
+    const quota = await fetchOauthUsage({ source: "env", accessToken });
+    return successProvider({
+      provider: "claude",
+      label: "Claude",
+      source: "oauth",
+      plan: quota.plan,
+      account: quota.account,
+      windows: quota.windows,
+      refreshedAt: quota.refreshedAt,
+      sourcesTried: ["token-file"],
+      attempts: attempt("success"),
+    });
+  } catch (error) {
+    const failure =
+      error instanceof ClaudeFailure
+        ? error
+        : new ClaudeFailure("claude_token_usage_unavailable", {
+            status: "error",
+          });
+    const report = failedProvider({
+      provider: "claude",
+      label: "Claude",
+      status: failure.status,
+      error: failure.code,
+      retryAfter: failure.retryAfter,
+      sourcesTried: ["token-file"],
+      attempts: attempt("failed", failure.code),
+    });
+    if (failure.authUsable) report.state.authStatus = "usable";
+    return report;
+  }
+}
+
+async function discoverClaudeLoginAccounts(
+  options?: ProviderOptions,
+  operation?: "quota" | "auth",
+  withTokens = false,
+): Promise<ProviderAccount[] | undefined> {
   if (claudeSwapEnabled()) {
     if (!options || operation !== "quota") return undefined;
     if (!options.refreshCredentials)
@@ -264,7 +368,9 @@ async function discoverClaudeAccounts(
       }),
     );
   }
-  const listed = claudeListedProfiles();
+  const listed =
+    claudeListedProfiles() ??
+    (withTokens ? { dirs: [], invalid: [] } : undefined);
   if (!listed) return undefined;
   const darwin = process.platform === "darwin";
   // One metadata listing for the whole read: discovery and every lane share
