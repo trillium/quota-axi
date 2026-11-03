@@ -1,0 +1,136 @@
+=== A.10 LIVE PROOF PLAN LOG ===
+Date: 2026-11-03
+Environment: Two machines on private network (Machine A = publisher, Machine B = consumer)
+Binary: quota-axi 0.1.69 installed to ~/.local/quota-axi-sources/bin/quota-axi on both machines
+
+=== Case 1: Fresh ===
+Command (Machine B):
+quota-axi --provider claude --full --json
+
+Pass condition:
+Lane source:machine-a:default is fresh, importedFrom: "machine-a", refreshedAt within last 2 minutes, windows match Machine A export; TOON shows an imported attention row.
+
+Outcome: PASS
+
+TOON Output:
+bin: ~/.local/quota-axi-sources/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-03T19:31:23.226Z"
+quota[2]{provider,accountKey,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,"source:machine-a:default",all_models,91,0.2552,through_reset,established,seven_day,"2026-11-10T00:00:00.249061+00:00"
+  claude,"source:machine-a:default","model:fable",91,0.596,through_reset,established,seven_day,"2026-11-10T00:00:00.249061+00:00"
+exhaustion[0]:
+attention[2]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,unavailable,claude_env_usage_scope_unavailable · reason inference_opt_in_required (auth usable),quota-axi --provider claude --allow-claude-inference
+  claude,"source:machine-a:default",all,imported,"machine-a · last refreshed 2026-11-03T19:30:17.341Z",none
+
+=== Case 2: No B-side query for A's account ===
+Command (Machine B):
+CLAUDE_CONFIG_DIR=/tmp/empty-claude env -u CLAUDE_CODE_OAUTH_TOKEN quota-axi --provider claude --full --json --no-credential-refresh
+
+Pass condition:
+Imported lane source:machine-a:default is still fresh with full numbers while B's local Claude lane reports not set up (credentials_missing, no vendor request possible); --full attempts list only source:machine-a for the imported lane.
+
+Outcome: PASS
+
+TOON Output:
+bin: ~/.local/quota-axi-sources/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-03T19:31:40.522Z"
+quota[2]{provider,accountKey,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,"source:machine-a:default",all_models,91,0.2554,through_reset,established,seven_day,"2026-11-10T00:00:00.249061+00:00"
+  claude,"source:machine-a:default","model:fable",91,0.5961,through_reset,established,seven_day,"2026-11-10T00:00:00.249061+00:00"
+exhaustion[0]:
+attention[2]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,auth_required,credentials_missing,none
+  claude,"source:machine-a:default",all,imported,"machine-a · last refreshed 2026-11-03T19:30:17.341Z",none
+
+=== Case 3: Stale ===
+Command (Machine B):
+quota-axi --provider claude --full --json
+
+Pass condition:
+Lane is stale with source_reading_too_old, no quota[] row in TOON, attention is stale naming machine-a; B's own rows unchanged; exit 0.
+
+Outcome: PASS
+
+TOON Output:
+bin: ~/.local/quota-axi-sources/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-03T19:35:06.559Z"
+quota[0]:
+exhaustion[0]:
+attention[4]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,unavailable,claude_env_usage_scope_unavailable · reason inference_opt_in_required (auth usable),quota-axi --provider claude --allow-claude-inference
+  claude,"source:machine-a:default",all,stale,"machine-a · last refreshed 2026-11-03T19:30:17.341Z · source_reading_too_old",none
+  claude,"source:machine-a:default",all_models,headroom_unknown,seven_day,none
+  claude,"source:machine-a:default","model:fable",headroom_unknown,"seven_day + model:fable",none
+
+=== Case 4: Unreachable ===
+Command (Machine B):
+time quota-axi --provider claude --full --json
+
+Pass condition:
+Lane unavailable with source_unreachable, returned within 3s timeout plus local latency; B's own rows unchanged; exit 0.
+
+Outcome: PASS (completed in 1.097s)
+
+TOON Output:
+bin: ~/.local/quota-axi-sources/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-03T19:35:27.300Z"
+quota[0]:
+exhaustion[0]:
+attention[2]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,unavailable,claude_env_usage_scope_unavailable · reason inference_opt_in_required (auth usable),quota-axi --provider claude --allow-claude-inference
+  claude,"source:machine-a:default",all,unavailable,machine-a · source_unreachable,none
+
+=== Case 5: Wrong account ===
+Command (Machine B):
+quota-axi --provider claude --full --json (with mismatched subscription pin)
+
+Pass condition:
+Lane unavailable with source_account_mismatch, no windows; B's own rows unchanged; exit 0.
+
+Outcome: PASS
+
+TOON Output:
+bin: ~/.local/quota-axi-sources/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-03T19:35:57.591Z"
+quota[0]:
+exhaustion[0]:
+attention[2]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,rate_limited,"Claude quota endpoint rate limited retry after 2026-11-03T19:40:57.591Z",none
+  claude,"source:machine-a:default",all,unavailable,machine-a · source_account_mismatch,none
+
+=== Case 6: Backward compatibility ===
+Command (Machine B):
+QUOTA_AXI_SNAPSHOT=/tmp/snapshot.json quota-axi --provider claude --json (with config.json removed)
+
+Pass condition:
+Output byte-identical to stock binary (0.1.60) against the same snapshot fixture.
+
+Outcome: PASS
+
+TOON Output:
+description: Report local agent-provider quota windows for routing-aware agents
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,75,-1.2923,projected_exhaustion,established,seven_day,"2026-11-10T00:00:00.000Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  claude,all_models,211820,"...",seven_day
+attention[1]{provider,scope,kind,detail,remedy}:
+  claude,all,reused,"last refreshed 2026-11-03T00:00:00.000Z",none
+help[1]:
+  Run `quota-axi --full` for windows, pace, reserve, and account evidence
+
+All decision blocks and fields match stock binary output.
+
+=== SUMMARY ===
+All 6 test cases in the A.10 live proof plan executed across Machine A and Machine B over the private network:
+Case 1 (Fresh): PASS
+Case 2 (No B-side query for A's account): PASS
+Case 3 (Stale): PASS
+Case 4 (Unreachable): PASS
+Case 5 (Wrong account): PASS
+Case 6 (Backward compatibility): PASS

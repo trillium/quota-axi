@@ -40,12 +40,14 @@ import { failedProvider } from "./providers/common.js";
 import { claudeSwapEnabled } from "./providers/claude-swap.js";
 import { PROVIDERS } from "./providers/index.js";
 import {
+  quotaExportReport,
   quotaJsonReport,
   redactedResponse,
   renderAuthToon,
   renderModelsToon,
   renderQuotaToon,
 } from "./render.js";
+import { readDeclaredSources } from "./sources.js";
 import { formatInterval, runLiveTui, type LiveTuiIo } from "./tui-live.js";
 import {
   detectTuiColorDepth,
@@ -82,6 +84,7 @@ export async function quotaCommand(
     refreshCredentials: flags.profileOnly ? false : !flags.noCredentialRefresh,
     ...(flags.allowClaudeInference ? { allowClaudeInference: true } : {}),
     ...(flags.profileOnly ? { credentialMode: "profile-only" as const } : {}),
+    ...(flags.noSources ? { noSources: true } : {}),
   };
 
   const maxAgeSeconds = flags.profileOnly ? 0 : readMaxAge(flags);
@@ -93,6 +96,7 @@ export async function quotaCommand(
     options,
     false,
     maxAgeSeconds,
+    flags.explicitProviders,
   );
   // Presence reads source attempts, which redaction removes, so both the JSON
   // marker and the TOON omission are classified on the complete model first.
@@ -102,6 +106,9 @@ export async function quotaCommand(
     (provider) =>
       providerPresence(provider, PROVIDERS[provider.provider]) === "absent",
   );
+  if (flags.export) {
+    return JSON.stringify(quotaExportReport(response, laneAbsent), null, 2);
+  }
   if (flags.json) {
     return JSON.stringify(
       quotaJsonReport(response, flags.full, laneAbsent),
@@ -208,7 +215,13 @@ async function quotaTuiReport(
   if (flags.once || !isInteractiveTerminal()) {
     await resolveTheme();
     return frame(
-      await loadQuota(flags.providers, options, false, maxAgeSeconds),
+      await loadQuota(
+        flags.providers,
+        options,
+        false,
+        maxAgeSeconds,
+        flags.explicitProviders,
+      ),
     );
   }
 
@@ -238,6 +251,7 @@ async function quotaTuiReport(
           : trigger === "tick"
             ? tickMaxAgeSeconds
             : maxAgeSeconds,
+        flags.explicitProviders,
       );
     },
     render: frame,
@@ -308,8 +322,14 @@ async function loadQuota(
   options: ProviderOptions,
   live: boolean,
   maxAgeSeconds: number,
+  explicitProviders = false,
 ): Promise<QuotaAxiResponse> {
-  const response = await fetchQuota(providers, options, maxAgeSeconds);
+  const response = await fetchQuota(
+    providers,
+    options,
+    maxAgeSeconds,
+    explicitProviders,
+  );
   const allFailed = response.providers.every(isFailed);
   if (allFailed) process.exitCode = 1;
   else if (live) process.exitCode = undefined;
@@ -325,8 +345,14 @@ export async function modelsCommand(
   const options: ProviderOptions = {
     allowKeychainPrompt: flags.allowKeychainPrompt,
     refreshCredentials: !flags.noCredentialRefresh,
+    ...(flags.noSources ? { noSources: true } : {}),
   };
-  const quota = await fetchQuota(flags.providers, options, readMaxAge(flags));
+  const quota = await fetchQuota(
+    flags.providers,
+    options,
+    readMaxAge(flags),
+    flags.explicitProviders,
+  );
   const response = createModelsResponse(quota, {
     ...(flags.intelligence ? { intelligence: flags.intelligence } : {}),
     ...(flags.sort ? { sort: flags.sort } : {}),
@@ -347,6 +373,20 @@ export async function authCommand(
 ): Promise<string> {
   const binPath = context?.binPath ?? "quota-axi";
   const flags = parseFlags(args);
+  if (flags.export) {
+    throw new AxiError(
+      "--export is only supported by the quota command",
+      "VALIDATION_ERROR",
+      ["Run `quota-axi --export` to publish quota readings"],
+    );
+  }
+  if (flags.noSources) {
+    throw new AxiError(
+      "--no-sources is only supported by the quota and models commands",
+      "VALIDATION_ERROR",
+      ["auth always inspects local credentials"],
+    );
+  }
   if (flags.allowClaudeInference) {
     throw new AxiError(
       "--allow-claude-inference is only supported by the quota command",
@@ -435,6 +475,7 @@ export async function fetchQuota(
   providers: ProviderId[],
   options: ProviderOptions,
   maxAgeSeconds = 0,
+  explicitProviders = false,
 ): Promise<QuotaAxiResponse> {
   const snapshot = snapshotFile();
   // A mistyped fixture path would otherwise read as a fixture naming no provider
@@ -448,11 +489,15 @@ export async function fetchQuota(
   if (!snapshot && !claudeSwapEnabled())
     validateClaudeProfiles(providers, options);
   const writesCache = options.credentialMode !== "profile-only" && !snapshot;
+  const readsSources =
+    !snapshot &&
+    options.credentialMode !== "profile-only" &&
+    !options.noSources;
   // Providers a lock holder already cached, so the report-wide write below
   // does not stamp them a second time
   const cached = new Set<ProviderId>();
-  const fetched = (
-    await Promise.all(
+  const [fetched, sourceLanes] = await Promise.all([
+    Promise.all(
       providers.map((provider) =>
         snapshot
           ? snapshotReadings(provider, snapshot)
@@ -463,19 +508,33 @@ export async function fetchQuota(
               () => cached.add(provider),
             ),
       ),
-    )
-  ).flat();
+    ).then((r) => r.flat()),
+    readsSources
+      ? readDeclaredSources(providers, explicitProviders)
+      : Promise.resolve([]),
+  ]);
+
+  const merged: ProviderQuota[] = [];
+  for (const provider of providers) {
+    const local = fetched.filter((p) => p.provider === provider);
+    const remote = sourceLanes.filter((p) => p.provider === provider);
+    merged.push(...local, ...remote);
+  }
+
   // Stamp after every fetch returns: a vendor that computes a reset at
   // response time implies a cycle start no earlier than that instant, so a
   // stamp taken before the request would read an unopened window as
   // `future_cycle_start` by the request latency.
   const generatedAt = nowIso();
-  const results = fetched.map((provider) =>
+  const results = merged.map((provider) =>
     withQuotaSemantics(provider, generatedAt),
   );
   if (writesCache) {
     writeCachedProvidersBestEffort(
-      results.filter((provider) => !cached.has(provider.provider)),
+      results.filter(
+        (provider) =>
+          !cached.has(provider.provider) && !provider.state.importedFrom,
+      ),
       generatedAt,
     );
   }

@@ -18,6 +18,10 @@ export type QuotaFlags = {
   explicitProviders: boolean;
   json: boolean;
   full: boolean;
+  /** Emit the machine-portable export tier for consumption by other machines. */
+  export: boolean;
+  /** Do not read declared custom quota sources. */
+  noSources: boolean;
   tui: boolean;
   allowKeychainPrompt: boolean;
   /** Permit one bounded Claude inference to recover env-token quota headers. */
@@ -101,6 +105,13 @@ export function parseModelsFlags(args: string[]): ModelsFlags {
       ],
     );
   }
+  if (flags.export) {
+    throw new AxiError(
+      "--export is only supported by the quota command",
+      "VALIDATION_ERROR",
+      ["Run `quota-axi --export` to publish quota readings"],
+    );
+  }
   if (flags.tui) {
     throw new AxiError(
       "--tui is only supported by the quota command",
@@ -128,6 +139,8 @@ function parseCommonFlags(
   const providerValues: string[] = [];
   let json = false;
   let full = false;
+  let exportMode = false;
+  let noSources = false;
   let tui = false;
   let once = false;
   let activeOnly = false;
@@ -153,6 +166,15 @@ function parseCommonFlags(
     }
     if (arg === "--full") {
       full = true;
+      continue;
+    }
+    if (arg === "--export") {
+      exportMode = true;
+      json = true;
+      continue;
+    }
+    if (arg === "--no-sources") {
+      noSources = true;
       continue;
     }
     if (arg === "--tui") {
@@ -259,10 +281,14 @@ function parseCommonFlags(
 
   if (tui && json) {
     throw new AxiError(
-      "--tui and --json are mutually exclusive output modes",
+      exportMode
+        ? "--tui and --export are mutually exclusive output modes"
+        : "--tui and --json are mutually exclusive output modes",
       "VALIDATION_ERROR",
       [
-        "Run `quota-axi --tui` for the human report or `quota-axi --json` for machine output",
+        exportMode
+          ? "Run `quota-axi --tui` for the human report or `quota-axi --export` to publish quota readings"
+          : "Run `quota-axi --tui` for the human report or `quota-axi --json` for machine output",
       ],
     );
   }
@@ -301,6 +327,8 @@ function parseCommonFlags(
     explicitProviders: providerValues.length > 0,
     json,
     full,
+    export: exportMode,
+    noSources,
     tui,
     once,
     activeOnly,

@@ -211,12 +211,16 @@ describe("CLI flag parsing", () => {
         allowClaudeInference: false,
         noCredentialRefresh: false,
         profileOnly: false,
+        export: false,
+        noSources: false,
       },
     );
     expect(parseFlags(["--tui"]).tui).toBe(true);
     expect(parseFlags(["--tui", "--once"]).once).toBe(true);
     expect(parseFlags(["--tui", "--active-only"]).activeOnly).toBe(true);
     expect(parseFlags(["--tui"]).activeOnly).toBe(false);
+    expect(parseFlags(["--export"]).export).toBe(true);
+    expect(parseFlags(["--no-sources"]).noSources).toBe(true);
   });
 
   it("parses whole-unit refresh intervals for the live report", () => {

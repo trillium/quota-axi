@@ -336,26 +336,28 @@ It is generated from `src/skill.ts` as a minimal stub: discovery frontmatter, wh
 
 ### Flags
 
-| Flag                                                                                                                                                         | Description                                                                                                            |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `--provider claude,codex,cursor,copilot,grok,kimi,zai,agy,alibaba,opencode-go,commandcode,minimax,mimo,deepseek,openrouter,elevenlabs,devin,muse,higgsfield` | Scope providers; repeat to union in first-seen order (`--provider zai --provider codex` equals `--provider zai,codex`) |
-| `--json`                                                                                                                                                     | Emit normalized JSON instead of TOON for quota, auth, or models                                                        |
-| `--full`                                                                                                                                                     | Include audit and derivation details                                                                                   |
-| `--tui`                                                                                                                                                      | Render the live human terminal report instead of TOON (quota only)                                                     |
-| `--refresh 30s\|5m\|1h`                                                                                                                                      | Live `--tui` refresh interval, default 5m (30s-24h)                                                                    |
-| `--once`                                                                                                                                                     | Render one `--tui` frame and exit instead of staying live                                                              |
-| `--active-only`                                                                                                                                              | `--tui` only: show only providers with a reading, hide the rest                                                        |
-| `--theme light\|dark\|system`                                                                                                                                | `--tui` palette; flag overrides `QUOTA_AXI_THEME`, default `dark`                                                      |
-| `--all`                                                                                                                                                      | Draw not-set-up providers as full `--tui` cards                                                                        |
-| `--allow-keychain-prompt`                                                                                                                                    | Permit native secure-store access that could prompt (macOS or Windows)                                                 |
-| `--allow-claude-inference`                                                                                                                                   | Spend one bounded native Claude inference to read env-token quota headers                                              |
-| `--no-credential-refresh`                                                                                                                                    | Never run a vendor CLI's own non-interactive credential refresh                                                        |
-| `--max-age 0\|90s\|2m`                                                                                                                                       | Opt in to reusing a fresh reading up to this old instead of asking the vendor; `0` always asks                         |
-| `--profile-only`                                                                                                                                             | Read one explicitly selected Claude or Codex credential file (quota only)                                              |
-| `--intelligence high\|medium\|low`                                                                                                                           | Filter `models` by editorial intelligence bucket                                                                       |
-| `--sort runway`                                                                                                                                              | Explicitly sort `models` by documented usable-runway evidence                                                          |
-| `-h`, `--help`                                                                                                                                               | Print terse [AXI](https://axi.md) help                                                                                 |
-| `-v`, `-V`, `--version`                                                                                                                                      | Print version                                                                                                          |
+| Flag                                                                                                                                                         | Description                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--provider claude,codex,cursor,copilot,grok,kimi,zai,agy,alibaba,opencode-go,commandcode,minimax,mimo,deepseek,openrouter,elevenlabs,devin,muse,higgsfield` | Scope providers; repeat to union in first-seen order (`--provider zai --provider codex` equals `--provider zai,codex`)                 |
+| `--json`                                                                                                                                                     | Emit normalized JSON instead of TOON for quota, auth, or models                                                                        |
+| `--full`                                                                                                                                                     | Include audit and derivation details                                                                                                   |
+| `--tui`                                                                                                                                                      | Render the live human terminal report instead of TOON (quota only)                                                                     |
+| `--refresh 30s\|5m\|1h`                                                                                                                                      | Live `--tui` refresh interval, default 5m (30s-24h)                                                                                    |
+| `--once`                                                                                                                                                     | Render one `--tui` frame and exit instead of staying live                                                                              |
+| `--active-only`                                                                                                                                              | `--tui` only: show only providers with a reading, hide the rest                                                                        |
+| `--theme light\|dark\|system`                                                                                                                                | `--tui` palette; flag overrides `QUOTA_AXI_THEME`, default `dark`                                                                      |
+| `--all`                                                                                                                                                      | Draw not-set-up providers as full `--tui` cards                                                                                        |
+| `--allow-keychain-prompt`                                                                                                                                    | Permit native secure-store access that could prompt (macOS or Windows)                                                                 |
+| `--allow-claude-inference`                                                                                                                                   | Spend one bounded native Claude inference to read env-token quota headers                                                              |
+| `--no-credential-refresh`                                                                                                                                    | Never run a vendor CLI's own non-interactive credential refresh                                                                        |
+| `--max-age 0\|90s\|2m`                                                                                                                                       | Opt in to reusing a fresh reading up to this old instead of asking the vendor; `0` always asks                                         |
+| `--profile-only`                                                                                                                                             | Read one explicitly selected Claude or Codex credential file (quota only)                                                              |
+| `--export`                                                                                                                                                   | Emit a shareable JSON reading without secrets, account identity, locators, or attempts (implies `--json`, rejects `--tui`, quota only) |
+| `--no-sources`                                                                                                                                               | Ignore custom quota sources declared in user config                                                                                    |
+| `--intelligence high\|medium\|low`                                                                                                                           | Filter `models` by editorial intelligence bucket                                                                                       |
+| `--sort runway`                                                                                                                                              | Explicitly sort `models` by documented usable-runway evidence                                                                          |
+| `-h`, `--help`                                                                                                                                               | Print terse [AXI](https://axi.md) help                                                                                                 |
+| `-v`, `-V`, `--version`                                                                                                                                      | Print version                                                                                                                          |
 
 ### Profile-only quota reads
 
@@ -573,6 +575,48 @@ Adapters can implement `ProviderAdapter.discoverAccounts` with stable keys and b
 Codex Pi sibling entries are the first discovery implementation on this tree, opt-in Claude profiles the second, and opt-in claude-swap accounts the third. An adapter may also name each lane's local selector as `ProviderAccount.locator`; the collector publishes it as `accountLocator` on an expanded lane's row, in `--full` only.
 Other adapters retain their existing source-selection behavior.
 
+### Custom quota sources
+
+quota-axi can read published quota readings on demand and add them as extra account rows (`source:<name>:<accountKey>`), so one vendor query on the machine that owns a login serves other machines without sharing credentials.
+
+#### Declaration
+
+Custom quota sources are declared under a `sources` array in `config.json` (`~/.config/quota-axi/config.json` or `$XDG_CONFIG_HOME/quota-axi/config.json`):
+
+```json
+{
+  "sources": [
+    {
+      "name": "remote-peer",
+      "url": "https://remote.example.internal/claude-export.json",
+      "supplies": [
+        {
+          "provider": "claude",
+          "accountKey": "default",
+          "subscription": "e8ceaa4f0c36d005f9c7a21dfd276a18ea4608e2f01d5beefe6b45cbb9c3c4c3"
+        }
+      ],
+      "maxAge": "10m",
+      "timeout": 3
+    },
+    {
+      "name": "local-file-peer",
+      "file": "/var/run/quota/codex-export.json",
+      "supplies": [{ "provider": "codex", "accountKey": "default" }]
+    }
+  ]
+}
+```
+
+- **Transport**: Default URL transport is `https:`. Plain `http:` requires explicit `"allowInsecureTransport": true`.
+- **Credentials & Headers**: Custom sources never send credentials or authorization headers.
+- **Scoping**: A source is only fetched when at least one supplied provider is in scope for the invocation.
+- **Bounds & Freshness**: Source responses are limited to 256 KiB; timeout is configurable up to 15s (default 3s). Readings older than `maxAge` (or 24h) are classified as `stale` with `source_reading_too_old` and produce no `quota[]` row.
+- **Fail-safe**: Source reads run in parallel with local reads. A failing source never causes local reads or sibling sources to fail. If a source fails, its lane reports `unavailable` with an explanatory error (such as `source_unreachable`, `source_timeout`, `source_http_error`, `source_malformed`, `source_missing_account`, or `source_account_mismatch`).
+- **No remote login remedies**: If a producer reports `auth_required`, the consumer lane becomes `unavailable` with `source_provider_auth_required`; the producer's `remedyCommand` and `authStatus` are omitted so remote credential issues never look like a local sign-out or runnable command.
+- **Cache neutrality**: Imported source lanes are never cached in the consumer's local quota cache.
+- **Bypass**: `--no-sources` bypasses all declared sources.
+
 ## Output Model
 
 The `quota` command's `--json` emits `schemaVersion: 5`, or `6` when a provider expands to multiple accounts.
@@ -634,6 +678,8 @@ An unknown or stale scope deliberately gets **no** `quota[]` row: the absence of
 
 `--full` adds; it never subtracts. Default TOON carries the three decision blocks; `--full` TOON adds the `providers[]`, `windows[]`, `scopeAudit[]`, `accounts[]`, and `attempts[]` audit blocks. Default `--json` carries the normalized model with derivation inputs demoted; `--full` restores them with **no renames and no re-nesting** - a demoted field is simply absent until `--full`, in the exact position and under the exact name it has there.
 
+`--export` is the publishing tier for custom quota sources (implies `--json`, rejects `--tui`, quota only). It retains derivation inputs (`windowSeconds`, `percentUsed`, `refreshedAt`) and a verified `subscription` hash needed for downstream pace and runway derivation, but strictly strips sensitive fields: account identity (`account`), account locator paths (`accountLocator`), and per-source attempts (`attempts`). Imported source lanes are also excluded so an exported reading never re-exports another source's data.
+
 | Demoted to `--full` in `--json`                                                                                                                |
 | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `providers[].label`, `providers[].source`                                                                                                      |
@@ -678,6 +724,8 @@ Claude `identityStatus` is `verified` only when Anthropic returns an authoritati
 | `authStatus`         | Optional machine-readable local auth usability: `usable`, `expired_refreshable`, or `unusable`. Distinct from quota freshness and from human `error` prose. |
 | `degradedSources`    | Optional `{ source, error? }` list of sources that failed or were superseded while a sibling answered, on a fresh reading; see the `degraded_source` row.   |
 | `reused`             | Optional `true` when this fresh reading was reused from the cache; `refreshedAt` then stays in default `--json`                                             |
+| `importedFrom`       | Optional name of the custom quota source that supplied this lane                                                                                            |
+| `errorDetail`        | Optional detail accompanying `state.error` on an imported source lane                                                                                       |
 
 When stale or unavailable quota is likely fixable by a one-time native secure-store grant, `state.reason` is `keychain_access_required`, `state.remedyCommand` supplies the runnable grant command (Copilot's includes `--provider copilot`), and for Claude, Cursor, and Muse JSON also includes an agent-directed `help` entry. That remedy is offered only for `keychain_prompt_required`; backend-specific consent behavior is described in [Provider notes](#provider-notes). A denied or timed-out Keychain outcome is reported as `keychain_access_denied` or `keychain_prompt_timeout` and stays silent no longer, but it does not advertise `--allow-keychain-prompt`. For Claude, macOS `security` exit 44 is cannot-reach (`keychain_unreachable`), not item-absent: it is not signed-out, and it does not retire the Claude cache. A successful metadata listing covering every keychain in the search list, with no matching or unrecognized Claude item, is the only evidence that establishes a missing Claude Keychain source; an empty, partial, or failed listing proves nothing and falls back to the exact profile-and-account read.
 When no Grok credential establishes usability but at least one still has a valid literal refresh token, `state.authStatus` is `expired_refreshable` and `state.status` is `unavailable` (not `auth_required`). Stored-expired bearers are first tested with bounded read-only liveness attempts; this classification stands only after the credential's own model catalog definitively rejects it or cannot decide, and an empirically live bearer reports fresh quota or `usable` instead. The `grok` remedy (`state.reason: credentials_expired`, `state.remedyCommand: grok`, plus an agent-directed JSON `help` entry telling the user to run the Grok CLI once) is emitted only when the same refreshable CLI candidate is rejected by both consumer quota and the official Grok Build model catalog. It survives the delegated `grok models` refresh, so it names the case where that delegate could not run or did not recover the session (see [Delegated credential refresh](#delegated-credential-refresh)). A transient failure does not trigger the remedy. If Grok CLI OIDC is refreshable and Pi is not usable, `state.error` is `Grok access token expired`. If only Pi `xai` OAuth is refreshable, `state.error` is `Pi xAI access token expired` and no Grok CLI remedy is emitted because Grok cannot refresh Pi-owned credentials. A Kimi soft expiry uses the same `credentials_expired` reason; its `pi` or `kimi` remedy is described in the [Kimi provider notes](#provider-notes). Default JSON exposes `authStatus`; for a provider shown in compact TOON without a `quota[]` row, a defined auth status appears as `(auth <status>)` in `attention[]`. Providers omitted because they are not set up follow [Default report blocks](#default-report-blocks). Source-appropriate advice is included only when a remedy exists. Full output shows the attempts: `model_auth_probe_live` means the credential's official model catalog accepted it but exposed no numeric quota. `attempts[].error: credentials_expired` marks a stored-expired credential that was not attempted.
@@ -1197,7 +1245,7 @@ Providers with no established non-interactive rotation command stay read-only on
 ### Safety guarantees
 
 - Quota and auth HTTP requests go only to first-party provider usage, quota, billing, entitlement, or read-only credential-liveness endpoints with the user's local credentials; quota-axi's direct Antigravity requests stay on 127.0.0.1 loopback.
-- The user-initiated `update` command is the only outbound non-provider network surface, and it is not part of quota measurement.
+- The user-initiated `update` command is the only outbound non-provider network surface, and it is not part of quota measurement. A URL quota source the user declares is the second outbound non-provider surface; it is read without credentials, only when declared, and only when a provider it supplies is in scope.
 - It sends credential values only to the first-party provider request they authenticate.
 - It never prints, logs, or caches credential values.
 - It never mints, rotates, or writes a credential, and never performs a refresh-token exchange. Credential renewal is always delegated to the vendor CLI that owns the store (see [Delegated credential refresh](#delegated-credential-refresh)). Muse is the one provider whose only quota read, the Muse CLI's own startup request, also returns an API key; that read is verified to return the account's standing key rather than mint a fresh one, quota-axi discards the key while parsing, never stores or prints it, and bounds how often it sends the request (see [Muse provider notes](#provider-notes)).

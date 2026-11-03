@@ -1,5 +1,6 @@
 import { encode } from "@toon-format/toon";
 import { quotaHelpLines } from "./advice.js";
+import { subscriptionIdentity } from "./cache.js";
 import { accountColumns } from "./providers/accounts.js";
 import { collapseHome } from "./lib/fs.js";
 import { isUsageFetchFailure } from "./providers/usage-fetch-failure.js";
@@ -331,6 +332,19 @@ function providerStateRows(
       remedy: NONE,
     });
   }
+  if (
+    provider.state.importedFrom &&
+    !provider.state.stale &&
+    provider.state.status === "fresh"
+  ) {
+    rows.push({
+      ...providerColumns(provider),
+      scope: "all",
+      kind: "imported",
+      detail: `${provider.state.importedFrom}${DETAIL_SEPARATOR}last refreshed ${provider.state.refreshedAt ?? UNKNOWN}`,
+      remedy: NONE,
+    });
+  }
   const unresolved = joinIds(provider.quotaSemantics?.unresolvedWindowIds);
   if (unresolved) {
     rows.push({
@@ -402,6 +416,7 @@ function primaryProviderRow(provider: ProviderQuota): AttentionRow | undefined {
   if (!state.stale && state.status === "fresh") return undefined;
   const kind = state.stale ? "stale" : state.status;
   const staleDetail = [
+    provider.state.importedFrom,
     `last refreshed ${state.refreshedAt ?? UNKNOWN}`,
     state.error
       ? `${isUsageFetchFailure(provider) ? "fetch failed " : ""}${state.error}`
@@ -409,7 +424,13 @@ function primaryProviderRow(provider: ProviderQuota): AttentionRow | undefined {
   ]
     .filter((part): part is string => Boolean(part))
     .join(DETAIL_SEPARATOR);
-  const baseDetail = state.stale ? staleDetail : (state.error ?? kind);
+  const baseDetail = state.stale
+    ? staleDetail
+    : provider.state.importedFrom
+      ? [provider.state.importedFrom, state.error ?? kind, state.errorDetail]
+          .filter(Boolean)
+          .join(DETAIL_SEPARATOR)
+      : (state.error ?? kind);
   const detail = state.reason
     ? `${baseDetail}${DETAIL_SEPARATOR}reason ${state.reason}`
     : baseDetail;
@@ -716,13 +737,40 @@ export function quotaJsonReport(
         : {}),
       state: {
         ...provider.state,
-        // A reused reading's age is load-bearing, so its fetch time stays.
-        refreshedAt: provider.state.reused
-          ? provider.state.refreshedAt
-          : undefined,
+        // A reused or imported reading's age is load-bearing, so its fetch time stays.
+        refreshedAt:
+          provider.state.reused || provider.state.importedFrom
+            ? provider.state.refreshedAt
+            : undefined,
         sourcesTried: undefined,
       },
     })),
+  };
+}
+
+/**
+ * The `--export` payload: published tier for other machines.
+ * The `--full` model minus `account`, `accountLocator`, `attempts`;
+ * plus `subscription` from `subscriptionIdentity()`.
+ */
+export function quotaExportReport(
+  response: QuotaAxiResponse,
+  laneAbsent: readonly boolean[] = [],
+): QuotaAxiResponse {
+  const marked = markNotSetUp(response, laneAbsent);
+  return {
+    ...marked,
+    providers: marked.providers.map((provider) => {
+      const subscription =
+        subscriptionIdentity(provider) ?? provider.subscription;
+      return {
+        ...provider,
+        account: undefined,
+        accountLocator: undefined,
+        attempts: undefined,
+        ...(subscription ? { subscription } : {}),
+      };
+    }),
   };
 }
 

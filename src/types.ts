@@ -55,6 +55,7 @@ export type ProviderSource =
   | "web"
   | "local"
   | "cache"
+  | "remote"
   | "unavailable";
 
 export type ProviderStatus =
@@ -64,6 +65,15 @@ export type ProviderStatus =
   | "auth_required"
   | "rate_limited"
   | "error";
+
+export const PROVIDER_STATUSES = [
+  "fresh",
+  "stale",
+  "unavailable",
+  "auth_required",
+  "rate_limited",
+  "error",
+] as const satisfies readonly ProviderStatus[];
 
 /**
  * Machine-readable local auth usability, distinct from quota freshness.
@@ -352,6 +362,11 @@ export type ProviderQuota = {
     accountId?: string;
     identityStatus?: "verified" | "unverified";
   };
+  /**
+   * One-way subscription digest (`subscriptionIdentity()`). Published only on
+   * `--export` and verified source lanes when identity is verified.
+   */
+  subscription?: string;
   windows: QuotaWindow[];
   quotaSemantics?: QuotaSemantics;
   credits?: {
@@ -410,6 +425,10 @@ export type ProviderQuota = {
      * (kept in default `--json` when this is set) says when it was taken.
      */
     reused?: true;
+    /** Sparse marker: name of declared source this lane was imported from. */
+    importedFrom?: string;
+    /** Extra error detail for display (e.g. HTTP status or provider error). */
+    errorDetail?: string;
   };
   attempts?: SourceAttempt[];
   /**
@@ -436,6 +455,8 @@ export type ProviderOptions = {
   allowClaudeInference?: boolean;
   /** Restrict discovery to the provider's selected native profile file. */
   credentialMode?: "profile-only";
+  /** Do not read declared custom quota sources. */
+  noSources?: boolean;
   /**
    * Permit the quota path to run a vendor CLI's own non-interactive refresh
    * command when the same stored access token is expired, refreshable, and
