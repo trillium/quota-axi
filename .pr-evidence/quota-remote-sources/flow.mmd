@@ -1,0 +1,28 @@
+```mermaid
+flowchart TD
+  subgraph Before ["Before: Machine-Isolated Reads"]
+    direction TB
+    M1["Machine A (Account 1 Login)"] -->|vendor usage query| V1["Anthropic API"]
+    M1 --> R1["Machine A Report"]
+    M2["Machine B (Needs Account 1 Data)"] -->|No Account 1 Login| FAIL["Cannot See Account 1 Quota"]
+  end
+
+  subgraph After ["After: Custom Quota Sources (Proposal A)"]
+    direction TB
+    subgraph HostA ["Machine A (Publisher)"]
+      A_Cron["Timer / Cron"] -->|quota-axi --export| A_Pub["Local Read"]
+      A_Pub -->|single vendor call| A_Vend["Vendor Usage API"]
+      A_Pub -->|sanitized JSON| A_File["claude-export.json\n(no secrets, paths, or email)"]
+      A_File --> A_HTTP["Private LAN HTTP Server\n(e.g., :8943)"]
+    end
+
+    subgraph HostB ["Machine B (Consumer)"]
+      B_Conf["config.json\n(sources: machine-a)"] --> B_Run["quota-axi --provider claude"]
+      B_Run -->|parallel| B_Local["Local Read (Account 2)"]
+      B_Run -->|parallel GET (no credentials)| A_HTTP
+      B_Local --> B_Merge["Unified Report (TOON / JSON)"]
+      A_HTTP -->|imported lane| B_Merge
+      B_Merge --> B_Out["- claude default (Account 2)\n- claude source:machine-a:default\n  (fresh, pace re-derived)"]
+    end
+  end
+```

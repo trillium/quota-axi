@@ -454,7 +454,10 @@ function buildCard(
   generatedAtMs: number,
   show: TuiShow,
 ): Card {
-  const name = label ? `${provider.provider} · ${label}` : provider.provider;
+  const laneLabel = label ?? provider.state.importedFrom;
+  const name = laneLabel
+    ? `${provider.provider} · ${laneLabel}`
+    : provider.provider;
   return hasReading(provider)
     ? buildLiveCard(provider, name, generatedAtMs, show)
     : buildFailedCard(provider, name);
@@ -483,6 +486,20 @@ function reusedAge(
     : `reused ${Math.floor(seconds / 60)}m`;
 }
 
+/** How old an imported reading is, as the card title's `imported 42s` marker. */
+function importedAge(
+  refreshedAt: string | undefined,
+  generatedAtMs: number,
+): string {
+  const seconds = Math.floor(
+    (generatedAtMs - Date.parse(refreshedAt ?? "")) / 1_000,
+  );
+  if (!Number.isFinite(seconds) || seconds < 0) return "imported";
+  return seconds < 120
+    ? `imported ${seconds}s`
+    : `imported ${Math.floor(seconds / 60)}m`;
+}
+
 function buildLiveCard(
   provider: ProviderQuota,
   name: string,
@@ -497,6 +514,9 @@ function buildLiveCard(
     stale ? "stale" : undefined,
     provider.state.reused
       ? reusedAge(provider.state.refreshedAt, generatedAtMs)
+      : undefined,
+    provider.state.importedFrom
+      ? importedAge(provider.state.refreshedAt, generatedAtMs)
       : undefined,
   ]
     .filter((part): part is string => part !== undefined)

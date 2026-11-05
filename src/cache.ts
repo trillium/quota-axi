@@ -1274,7 +1274,7 @@ function readableWindowDuration(windowSeconds: number): string {
   return `${Number.isInteger(hours) ? hours : Number(hours.toFixed(2))}h`;
 }
 
-function normalizeCachedWindow(raw: unknown): QuotaWindow | undefined {
+export function normalizeCachedWindow(raw: unknown): QuotaWindow | undefined {
   const data = objectValue(raw);
   if (!data) return undefined;
   const id = stringValue(data.id);

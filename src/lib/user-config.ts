@@ -1,14 +1,16 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { AxiError } from "axi-sdk-js";
 import type { TuiShow } from "../tui.js";
+import { PROVIDER_IDS, type ProviderId } from "../types.js";
 import { readJsonFile } from "./fs.js";
 
 /**
  * The user-level quota-axi configuration file:
  * `$XDG_CONFIG_HOME/quota-axi/config.json`, or `~/.config/quota-axi/config.json`
- * when `XDG_CONFIG_HOME` is unset. It holds human preferences only, so nothing
- * an agent reads from quota-axi ever depends on it.
+ * when `XDG_CONFIG_HOME` is unset. It holds human display preferences and
+ * declared custom quota sources.
  */
 export function userConfigFilePath(
   environment: Record<string, string | undefined> = process.env,
@@ -86,4 +88,329 @@ function canonicalPath(path: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export type QuotaSourceSupplies = {
+  provider: ProviderId;
+  accountKey: string;
+  subscription?: string;
+};
+
+export type QuotaSourceDeclaration = {
+  name: string;
+  url?: string;
+  file?: string;
+  allowInsecureTransport?: boolean;
+  supplies: QuotaSourceSupplies[];
+  maxAge: number;
+  timeout: number;
+};
+
+const ALLOWED_SOURCE_KEYS = new Set([
+  "name",
+  "url",
+  "file",
+  "allowInsecureTransport",
+  "supplies",
+  "maxAge",
+  "timeout",
+]);
+
+const ALLOWED_SUPPLIES_KEYS = new Set([
+  "provider",
+  "accountKey",
+  "subscription",
+]);
+
+/**
+ * Strict parser for declared custom quota sources in the user config file.
+ * Throws VALIDATION_ERROR when any malformed declaration exists for a
+ * provider that is in scope for this invocation.
+ */
+export function readQuotaSources(
+  file: string = userConfigFilePath(),
+  inScopeProviders?: readonly ProviderId[],
+  explicitProviders = false,
+): QuotaSourceDeclaration[] {
+  const config = readJsonFile(file);
+  if (!isRecord(config) || config.sources === undefined) return [];
+  if (!Array.isArray(config.sources)) {
+    throw new AxiError(
+      "sources must be an array in config.json",
+      "VALIDATION_ERROR",
+      ["Declare sources as an array of source objects"],
+    );
+  }
+
+  // Determine which raw sources are in scope
+  const inScope = config.sources.filter((raw) => {
+    if (!explicitProviders || inScopeProviders === undefined) return true;
+    const supplies = rawSuppliesList(raw);
+    return supplies.some(
+      (entry) =>
+        entry.provider !== undefined &&
+        inScopeProviders.includes(entry.provider as ProviderId),
+    );
+  });
+
+  const validated: QuotaSourceDeclaration[] = [];
+  const seenNames = new Set<string>();
+  const seenPairs = new Set<string>();
+
+  for (const raw of inScope) {
+    if (!isRecord(raw)) {
+      throw new AxiError(
+        "source declaration must be an object",
+        "VALIDATION_ERROR",
+        ["Declare each source as a JSON object"],
+      );
+    }
+
+    for (const key of Object.keys(raw)) {
+      if (!ALLOWED_SOURCE_KEYS.has(key)) {
+        throw new AxiError(
+          `unknown key in source declaration: ${key}`,
+          "VALIDATION_ERROR",
+          ["Remove unknown keys from source declaration"],
+        );
+      }
+    }
+
+    if (
+      typeof raw.name !== "string" ||
+      !/^[a-z0-9][a-z0-9-]{0,31}$/.test(raw.name)
+    ) {
+      throw new AxiError(
+        `invalid source name: ${String(raw.name)}`,
+        "VALIDATION_ERROR",
+        ["Source name must match ^[a-z0-9][a-z0-9-]{0,31}$"],
+      );
+    }
+    const name = raw.name;
+
+    if (seenNames.has(name)) {
+      throw new AxiError(`duplicate source name: ${name}`, "VALIDATION_ERROR", [
+        "Source names must be unique across sources",
+      ]);
+    }
+    seenNames.add(name);
+
+    const hasUrl = raw.url !== undefined;
+    const hasFile = raw.file !== undefined;
+    if (hasUrl && hasFile) {
+      throw new AxiError(
+        `source ${name} declares both url and file`,
+        "VALIDATION_ERROR",
+        ["Declare exactly one of url or file"],
+      );
+    }
+    if (!hasUrl && !hasFile) {
+      throw new AxiError(
+        `source ${name} declares neither url nor file`,
+        "VALIDATION_ERROR",
+        ["Declare exactly one of url or file"],
+      );
+    }
+
+    let url: string | undefined;
+    let filePath: string | undefined;
+    let allowInsecureTransport: boolean | undefined;
+
+    if (raw.allowInsecureTransport !== undefined) {
+      if (typeof raw.allowInsecureTransport !== "boolean") {
+        throw new AxiError(
+          `source ${name} allowInsecureTransport must be a boolean`,
+          "VALIDATION_ERROR",
+        );
+      }
+      allowInsecureTransport = raw.allowInsecureTransport;
+    }
+
+    if (hasFile) {
+      if (typeof raw.file !== "string" || !raw.file.trim()) {
+        throw new AxiError(
+          `source ${name} file must be a non-empty string`,
+          "VALIDATION_ERROR",
+        );
+      }
+      const trimmedFile = raw.file.trim();
+      if (!trimmedFile.startsWith("/") && !trimmedFile.startsWith("~/")) {
+        throw new AxiError(
+          `source ${name} file path must be absolute or ~/-relative: ${trimmedFile}`,
+          "VALIDATION_ERROR",
+          ["Provide an absolute path or ~/-relative path"],
+        );
+      }
+      filePath = expandHome(trimmedFile);
+    }
+
+    if (hasUrl) {
+      if (typeof raw.url !== "string" || !raw.url.trim()) {
+        throw new AxiError(
+          `source ${name} url must be a non-empty string`,
+          "VALIDATION_ERROR",
+        );
+      }
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(raw.url.trim());
+      } catch {
+        throw new AxiError(
+          `source ${name} url is invalid: ${raw.url}`,
+          "VALIDATION_ERROR",
+        );
+      }
+      if (parsedUrl.protocol === "http:") {
+        if (allowInsecureTransport !== true) {
+          throw new AxiError(
+            `source ${name} uses http without allowInsecureTransport: true`,
+            "VALIDATION_ERROR",
+            ["Set allowInsecureTransport: true to permit unencrypted http"],
+          );
+        }
+      } else if (parsedUrl.protocol !== "https:") {
+        throw new AxiError(
+          `source ${name} url scheme must be https: or http: with allowInsecureTransport`,
+          "VALIDATION_ERROR",
+        );
+      }
+      url = parsedUrl.href;
+    }
+
+    if (!Array.isArray(raw.supplies) || raw.supplies.length === 0) {
+      throw new AxiError(
+        `source ${name} supplies must be a non-empty array`,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    const supplies: QuotaSourceSupplies[] = [];
+    for (const entry of raw.supplies) {
+      if (!isRecord(entry)) {
+        throw new AxiError(
+          `source ${name} supplies entry must be an object`,
+          "VALIDATION_ERROR",
+        );
+      }
+      for (const key of Object.keys(entry)) {
+        if (!ALLOWED_SUPPLIES_KEYS.has(key)) {
+          throw new AxiError(
+            `unknown key in source ${name} supplies: ${key}`,
+            "VALIDATION_ERROR",
+          );
+        }
+      }
+      if (
+        typeof entry.provider !== "string" ||
+        !PROVIDER_IDS.includes(entry.provider as ProviderId)
+      ) {
+        throw new AxiError(
+          `source ${name} supplies unknown provider: ${String(entry.provider)}`,
+          "VALIDATION_ERROR",
+          [`Supported providers: ${PROVIDER_IDS.join(", ")}`],
+        );
+      }
+      const provider = entry.provider as ProviderId;
+
+      if (
+        typeof entry.accountKey !== "string" ||
+        !/^[a-z0-9][a-z0-9:_-]{0,95}$/.test(entry.accountKey)
+      ) {
+        throw new AxiError(
+          `source ${name} supplies invalid accountKey: ${String(entry.accountKey)}`,
+          "VALIDATION_ERROR",
+        );
+      }
+      const accountKey = entry.accountKey;
+
+      let subscription: string | undefined;
+      if (entry.subscription !== undefined) {
+        if (
+          typeof entry.subscription !== "string" ||
+          !/^[a-f0-9]{64}$/.test(entry.subscription)
+        ) {
+          throw new AxiError(
+            `source ${name} supplies invalid subscription digest: ${String(entry.subscription)}`,
+            "VALIDATION_ERROR",
+            ["Subscription pin must be a 64-character lowercase hex digest"],
+          );
+        }
+        subscription = entry.subscription;
+      }
+
+      const pairKey = `${provider}:${accountKey}`;
+      if (seenPairs.has(pairKey)) {
+        throw new AxiError(
+          `duplicate provider and accountKey across sources: ${pairKey}`,
+          "VALIDATION_ERROR",
+          ["Each provider and accountKey pair may only be declared once"],
+        );
+      }
+      seenPairs.add(pairKey);
+
+      supplies.push({
+        provider,
+        accountKey,
+        ...(subscription ? { subscription } : {}),
+      });
+    }
+
+    const maxAgeSeconds = parseSourceDuration(raw.maxAge);
+    if (
+      maxAgeSeconds === undefined ||
+      maxAgeSeconds <= 0 ||
+      maxAgeSeconds > 86_400
+    ) {
+      throw new AxiError(
+        `source ${name} maxAge must be a duration between 1s and 24h`,
+        "VALIDATION_ERROR",
+        ["Provide a duration such as 10m or 1h up to 24h"],
+      );
+    }
+
+    let timeoutSeconds = 3;
+    if (raw.timeout !== undefined) {
+      const parsedTimeout = parseSourceDuration(raw.timeout);
+      if (
+        parsedTimeout === undefined ||
+        parsedTimeout <= 0 ||
+        parsedTimeout > 15
+      ) {
+        throw new AxiError(
+          `source ${name} timeout must be a duration between 1s and 15s`,
+          "VALIDATION_ERROR",
+          ["Provide a duration such as 3s or 5s up to 15s"],
+        );
+      }
+      timeoutSeconds = parsedTimeout;
+    }
+
+    validated.push({
+      name,
+      ...(url ? { url } : {}),
+      ...(filePath ? { file: filePath } : {}),
+      ...(allowInsecureTransport ? { allowInsecureTransport } : {}),
+      supplies,
+      maxAge: maxAgeSeconds,
+      timeout: timeoutSeconds,
+    });
+  }
+
+  return validated;
+}
+
+function rawSuppliesList(raw: unknown): { provider?: unknown }[] {
+  if (!isRecord(raw) || !Array.isArray(raw.supplies)) return [];
+  return raw.supplies.filter(isRecord);
+}
+
+function parseSourceDuration(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d{1,7})(s|m|h)?$/.exec(value.trim());
+  if (!match) return undefined;
+  const multiplier = match[2] === "h" ? 3600 : match[2] === "m" ? 60 : 1;
+  return Number(match[1]) * multiplier;
 }
