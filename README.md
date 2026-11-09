@@ -362,6 +362,7 @@ It is generated from `src/skill.ts` as a minimal stub: discovery frontmatter, wh
 | `--profile-only`                                                                                                                                             | Read one explicitly selected Claude or Codex credential file (quota only)                                                              |
 | `--export`                                                                                                                                                   | Emit a shareable JSON reading without secrets, account identity, locators, or attempts (implies `--json`, rejects `--tui`, quota only) |
 | `--no-sources`                                                                                                                                               | Ignore custom quota sources declared in user config                                                                                    |
+| `--no-shared`                                                                                                                                                | Read every local lane yourself even when a declared source shares a fresh reading (sources are still listed)                           |
 | `--intelligence high\|medium\|low`                                                                                                                           | Filter `models` by editorial intelligence bucket                                                                                       |
 | `--sort runway`                                                                                                                                              | Explicitly sort `models` by documented usable-runway evidence                                                                          |
 | `-h`, `--help`                                                                                                                                               | Print terse [AXI](https://axi.md) help                                                                                                 |
@@ -623,7 +624,42 @@ Custom quota sources are declared under a `sources` array in `config.json` (`~/.
 - **Fail-safe**: Source reads run in parallel with local reads. A failing source never causes local reads or sibling sources to fail. If a source fails, its lane reports `unavailable` with an explanatory error (such as `source_unreachable`, `source_timeout`, `source_http_error`, `source_malformed`, `source_missing_account`, or `source_account_mismatch`).
 - **No remote login remedies**: If a producer reports `auth_required`, the consumer lane becomes `unavailable` with `source_provider_auth_required`; the producer's `remedyCommand` and `authStatus` are omitted so remote credential issues never look like a local sign-out or runnable command.
 - **Cache neutrality**: Imported source lanes are never cached in the consumer's local quota cache.
-- **Bypass**: `--no-sources` bypasses all declared sources.
+- **Bypass**: `--no-sources` bypasses all declared sources, including shared-first.
+
+#### Shared first, check when stale
+
+When a declared source supplies a reading for an account that a local lane also covers, quota-axi uses the shared reading and skips the local vendor read for that lane, so one machine's check serves the others. When the shared reading is missing, failed, rejected by its producer, or older than the source's `maxAge`, the lane is read locally exactly as without sources.
+
+A source reading stands in for a local lane only on explicit identity, never by email, label, or position:
+
+- **`standsFor`** on a `supplies` entry names the local lane it stands for, by the `accountKey` the lane has in this machine's report (a Claude setup-token lane such as `token:<digest>`, an opted-in profile lane, a Codex lane), or `default` for the single selected lane of a provider that is not account-expanded. Use it where a lane has no comparable identity, such as a Claude setup-token lane. A `standsFor` may be named by one entry only. If the entry also pins a `subscription`, or both sides verify a subscription and the two differ, the reading is refused and the lane is read locally.
+- **Verified subscription hash**: an entry without `standsFor` serves the local lane whose own last local read verified the same hashed subscription (the `subscription` the source publishes and the stamp this machine's cache slot recorded for that lane, the identity coalescing uses). A lane that has never verified an identity, or whose slot was stamped more than 24 hours ago or before a credential file it depended on changed, is read locally, which re-verifies it; shared-first never guesses an identity.
+
+```json
+{
+  "sharedFirst": true,
+  "sources": [
+    {
+      "name": "macbook",
+      "url": "http://100.84.99.99:8794/fm_quota/melanie",
+      "allowInsecureTransport": true,
+      "supplies": [
+        {
+          "provider": "claude",
+          "accountKey": "melanie",
+          "standsFor": "token:3f9c1d5e8a7b2c40d6e19f03"
+        }
+      ],
+      "maxAge": "3m"
+    }
+  ]
+}
+```
+
+- **Freshness bound**: the source's `maxAge` is the single bound. A reading no older than `maxAge` is fresh and may stand in for a local read; an older one is reported as a stale source row and the lane is read locally. Choose it from how often the producer pushes: a one-minute push with `maxAge: "3m"` shares nearly always and checks locally when the pusher stops.
+- **Switches**: `"sharedFirst": false` at the top of `config.json` turns the behavior off for every source, `"share": false` on one source turns it off for that source, and `--no-shared` turns it off for one run. In each case sources are still read and listed as `source:<name>:<accountKey>` rows, and every lane is read locally. `--no-sources` reads no source at all. A non-boolean `sharedFirst` or `share` is a validation error.
+- **Output**: a served lane keeps its local `accountKey` (or none, for the single selected lane, so a report that never expanded keeps its shape) and is not also listed as a `source:` row. It carries `state.sharedFrom` (the source name) together with `state.importedFrom` and the reading's own `refreshedAt`, and default TOON adds an `attention[]` row of kind `shared` (`<source> · last refreshed <time>`); `--tui` titles the card `shared <age>`. Lanes read locally carry neither marker.
+- **Safety**: no credential or authorization header is sent to a source, and a source failure never fails a local read. A served lane is never written to the local cache (so it never serves later as a local reading, and a provider with a served lane gets no fresh-reuse stamp) and `--export` never publishes it. An export also reads no source, so a published reading is always this machine's own.
 
 ## Output Model
 
@@ -664,6 +700,7 @@ A `quota[]` row whose `runway` is `projected_exhaustion` or `exhausted_now` has 
 | `unmeasurable`                                          | scope   | Headroom is known but a bound blocks `runway`, `spendPriority`, or both. `detail` names which.                                                                                                                                                                    |
 | `degraded_source`                                       | `all`   | A source was broken or unreadable while a sibling source answered: a superseded credential source, or Higgsfield's failed auxiliary `account transactions` / `generate list` read. `detail` is `<source> · <error>`. One row per source, only on a fresh reading. |
 | `reused`                                                | `all`   | A fresh reading was reused instead of asking the vendor again. `detail` is `last refreshed <refreshedAt>`. See [Fresh reuse](#fresh-reuse).                                                                                                                       |
+| `shared`                                                | `all`   | A local lane was served from a declared source's fresh reading instead of a local vendor read. `detail` is `<source> · last refreshed <refreshedAt>`. See [Shared first](#shared-first-check-when-stale).                                                         |
 
 `remedy` carries `state.remedyCommand` when one exists, and situational agent-directed advice is still prepended to `help`.
 
@@ -733,6 +770,7 @@ Claude `identityStatus` is `verified` only when Anthropic returns an authoritati
 | `degradedSources`    | Optional `{ source, error? }` list of sources that failed or were superseded while a sibling answered, on a fresh reading; see the `degraded_source` row.   |
 | `reused`             | Optional `true` when this fresh reading was reused from the cache; `refreshedAt` then stays in default `--json`                                             |
 | `importedFrom`       | Optional name of the custom quota source that supplied this lane                                                                                            |
+| `sharedFrom`         | Optional name of the custom quota source whose fresh reading stood in for this local lane's vendor read; always set with `importedFrom`                     |
 | `errorDetail`        | Optional detail accompanying `state.error` on an imported source lane                                                                                       |
 
 When stale or unavailable quota is likely fixable by a one-time native secure-store grant, `state.reason` is `keychain_access_required`, `state.remedyCommand` supplies the runnable grant command (Copilot's includes `--provider copilot`), and for Claude, Cursor, and Muse JSON also includes an agent-directed `help` entry. That remedy is offered only for `keychain_prompt_required`; backend-specific consent behavior is described in [Provider notes](#provider-notes). A denied or timed-out Keychain outcome is reported as `keychain_access_denied` or `keychain_prompt_timeout` and stays silent no longer, but it does not advertise `--allow-keychain-prompt`. For Claude, macOS `security` exit 44 is cannot-reach (`keychain_unreachable`), not item-absent: it is not signed-out, and it does not retire the Claude cache. A successful metadata listing covering every keychain in the search list, with no matching or unrecognized Claude item, is the only evidence that establishes a missing Claude Keychain source; an empty, partial, or failed listing proves nothing and falls back to the exact profile-and-account read.

@@ -486,18 +486,20 @@ function reusedAge(
     : `reused ${Math.floor(seconds / 60)}m`;
 }
 
-/** How old an imported reading is, as the card title's `imported 42s` marker. */
+/** How old an imported reading is, as the card title's `imported 42s` (or `shared 42s`) marker. */
 function importedAge(
   refreshedAt: string | undefined,
   generatedAtMs: number,
+  shared = false,
 ): string {
+  const marker = shared ? "shared" : "imported";
   const seconds = Math.floor(
     (generatedAtMs - Date.parse(refreshedAt ?? "")) / 1_000,
   );
-  if (!Number.isFinite(seconds) || seconds < 0) return "imported";
+  if (!Number.isFinite(seconds) || seconds < 0) return marker;
   return seconds < 120
-    ? `imported ${seconds}s`
-    : `imported ${Math.floor(seconds / 60)}m`;
+    ? `${marker} ${seconds}s`
+    : `${marker} ${Math.floor(seconds / 60)}m`;
 }
 
 function buildLiveCard(
@@ -516,7 +518,11 @@ function buildLiveCard(
       ? reusedAge(provider.state.refreshedAt, generatedAtMs)
       : undefined,
     provider.state.importedFrom
-      ? importedAge(provider.state.refreshedAt, generatedAtMs)
+      ? importedAge(
+          provider.state.refreshedAt,
+          generatedAtMs,
+          provider.state.sharedFrom !== undefined,
+        )
       : undefined,
   ]
     .filter((part): part is string => part !== undefined)

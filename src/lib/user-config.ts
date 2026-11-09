@@ -94,6 +94,12 @@ export type QuotaSourceSupplies = {
   provider: ProviderId;
   accountKey: string;
   subscription?: string;
+  /**
+   * The local lane (`accountKey` as discovered; `default` for the single
+   * selected lane) this entry stands for. While the source's reading is fresh,
+   * that lane is served from it instead of asking its vendor.
+   */
+  standsFor?: string;
 };
 
 export type QuotaSourceDeclaration = {
@@ -104,6 +110,8 @@ export type QuotaSourceDeclaration = {
   supplies: QuotaSourceSupplies[];
   maxAge: number;
   timeout: number;
+  /** Present only as `false`: this source never stands in for a local read. */
+  share?: false;
 };
 
 const ALLOWED_SOURCE_KEYS = new Set([
@@ -114,12 +122,14 @@ const ALLOWED_SOURCE_KEYS = new Set([
   "supplies",
   "maxAge",
   "timeout",
+  "share",
 ]);
 
 const ALLOWED_SUPPLIES_KEYS = new Set([
   "provider",
   "accountKey",
   "subscription",
+  "standsFor",
 ]);
 
 /**
@@ -156,6 +166,7 @@ export function readQuotaSources(
   const validated: QuotaSourceDeclaration[] = [];
   const seenNames = new Set<string>();
   const seenPairs = new Set<string>();
+  const seenStandsFor = new Set<string>();
 
   for (const raw of inScope) {
     if (!isRecord(raw)) {
@@ -338,6 +349,30 @@ export function readQuotaSources(
         subscription = entry.subscription;
       }
 
+      let standsFor: string | undefined;
+      if (entry.standsFor !== undefined) {
+        if (
+          typeof entry.standsFor !== "string" ||
+          !/^[a-z0-9][a-z0-9:_-]{0,95}$/.test(entry.standsFor)
+        ) {
+          throw new AxiError(
+            `source ${name} supplies invalid standsFor: ${String(entry.standsFor)}`,
+            "VALIDATION_ERROR",
+            ["standsFor names one local lane's accountKey, such as default"],
+          );
+        }
+        standsFor = entry.standsFor;
+        const standsForKey = `${provider}:${standsFor}`;
+        if (seenStandsFor.has(standsForKey)) {
+          throw new AxiError(
+            `duplicate standsFor across sources: ${standsForKey}`,
+            "VALIDATION_ERROR",
+            ["Each local lane may be stood in for by one supplies entry only"],
+          );
+        }
+        seenStandsFor.add(standsForKey);
+      }
+
       const pairKey = `${provider}:${accountKey}`;
       if (seenPairs.has(pairKey)) {
         throw new AxiError(
@@ -352,6 +387,7 @@ export function readQuotaSources(
         provider,
         accountKey,
         ...(subscription ? { subscription } : {}),
+        ...(standsFor ? { standsFor } : {}),
       });
     }
 
@@ -385,6 +421,13 @@ export function readQuotaSources(
       timeoutSeconds = parsedTimeout;
     }
 
+    if (raw.share !== undefined && typeof raw.share !== "boolean") {
+      throw new AxiError(
+        `source ${name} share must be a boolean`,
+        "VALIDATION_ERROR",
+      );
+    }
+
     validated.push({
       name,
       ...(url ? { url } : {}),
@@ -393,10 +436,31 @@ export function readQuotaSources(
       supplies,
       maxAge: maxAgeSeconds,
       timeout: timeoutSeconds,
+      ...(raw.share === false ? { share: false as const } : {}),
     });
   }
 
   return validated;
+}
+
+/**
+ * The `sharedFirst` switch in the user config file: whether a fresh reading
+ * from a declared source stands in for a matching local lane's vendor read.
+ * On unless the file says exactly `false`; any other non-boolean value throws
+ * rather than silently skipping or forcing local reads.
+ */
+export function readSharedFirst(file: string = userConfigFilePath()): boolean {
+  const config = readJsonFile(file);
+  const value = isRecord(config) ? config.sharedFirst : undefined;
+  if (value === undefined) return true;
+  if (typeof value !== "boolean") {
+    throw new AxiError(
+      "sharedFirst must be a boolean in config.json",
+      "VALIDATION_ERROR",
+      ["Set sharedFirst to false to read every local lane yourself"],
+    );
+  }
+  return value;
 }
 
 function rawSuppliesList(raw: unknown): { provider?: unknown }[] {

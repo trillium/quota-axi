@@ -427,6 +427,12 @@ export type ProviderQuota = {
     reused?: true;
     /** Sparse marker: name of declared source this lane was imported from. */
     importedFrom?: string;
+    /**
+     * Sparse marker on a local lane: no vendor read was made for it because the
+     * named declared source's fresh reading stood in for it. Always set together
+     * with `importedFrom`, so the lane is never cached or re-exported as local.
+     */
+    sharedFrom?: string;
     /** Extra error detail for display (e.g. HTTP status or provider error). */
     errorDetail?: string;
   };
@@ -457,6 +463,8 @@ export type ProviderOptions = {
   credentialMode?: "profile-only";
   /** Do not read declared custom quota sources. */
   noSources?: boolean;
+  /** Read every local lane even when a declared source shares a fresh reading. */
+  noShared?: boolean;
   /**
    * Permit the quota path to run a vendor CLI's own non-interactive refresh
    * command when the same stored access token is expired, refreshable, and

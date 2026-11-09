@@ -7,10 +7,12 @@ import type {
   SourceAttempt,
 } from "../types.js";
 import {
+  cachedLaneSubscription,
   markSupersededReadings,
   subscriptionIdentity,
   supersededReadings,
 } from "../cache.js";
+import type { DeclaredSources } from "../sources.js";
 import { sourceNames } from "./common.js";
 
 /**
@@ -48,19 +50,45 @@ async function accountsFor(
   return usable.length > 0 ? usable : undefined;
 }
 
+/**
+ * `declared` is consulted per lane before its vendor read: a fresh reading a
+ * declared source shares for exactly that lane stands in for the read. The
+ * single selected lane is `default`; a lane's cache slot is keyless unless the
+ * report expands, so that is where its last verified subscription is looked up.
+ */
 export async function fetchAccountQuotas(
   adapter: ProviderAdapter,
   options: ProviderOptions,
+  declared?: DeclaredSources,
 ): Promise<ProviderQuota[]> {
   const accounts = await accountsFor(adapter, options, "quota");
-  if (!accounts) return [await adapter.fetchQuota(options)];
+  if (!accounts) {
+    const shared = await declared?.claim({
+      provider: adapter.id,
+      laneKey: "default",
+      identity: () => cachedLaneSubscription(adapter.id, undefined),
+    });
+    return [shared ?? (await adapter.fetchQuota(options))];
+  }
   // Keep each adapter's declaration order, including failed accounts. Readers
   // return their own structured failure; no account selects a sibling's token.
   // After every lane has been read, collection coalesces readings that share a
   // verified subscription identity so a second route is not extra capacity.
   const readings: { account: ProviderAccount; report: ProviderQuota }[] = [];
   for (const account of accounts) {
-    let report: ProviderQuota | undefined;
+    let report: ProviderQuota | undefined = await declared?.claim({
+      provider: adapter.id,
+      laneKey: account.accountKey,
+      identity: () =>
+        cachedLaneSubscription(
+          adapter.id,
+          accounts.length > 1 ? account.accountKey : undefined,
+        ),
+    });
+    if (report) {
+      readings.push({ account, report });
+      continue;
+    }
     try {
       report = await account.fetchQuota(options);
     } catch {

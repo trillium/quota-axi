@@ -340,7 +340,7 @@ function providerStateRows(
     rows.push({
       ...providerColumns(provider),
       scope: "all",
-      kind: "imported",
+      kind: provider.state.sharedFrom ? "shared" : "imported",
       detail: `${provider.state.importedFrom}${DETAIL_SEPARATOR}last refreshed ${provider.state.refreshedAt ?? UNKNOWN}`,
       remedy: NONE,
     });
@@ -760,17 +760,21 @@ export function quotaExportReport(
   const marked = markNotSetUp(response, laneAbsent);
   return {
     ...marked,
-    providers: marked.providers.map((provider) => {
-      const subscription =
-        subscriptionIdentity(provider) ?? provider.subscription;
-      return {
-        ...provider,
-        account: undefined,
-        accountLocator: undefined,
-        attempts: undefined,
-        ...(subscription ? { subscription } : {}),
-      };
-    }),
+    // Another machine's reading, imported or standing in for a local lane, is
+    // never re-published as this machine's own.
+    providers: marked.providers
+      .filter((provider) => !provider.state.importedFrom)
+      .map((provider) => {
+        const subscription =
+          subscriptionIdentity(provider) ?? provider.subscription;
+        return {
+          ...provider,
+          account: undefined,
+          accountLocator: undefined,
+          attempts: undefined,
+          ...(subscription ? { subscription } : {}),
+        };
+      }),
   };
 }
 
