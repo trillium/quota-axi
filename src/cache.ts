@@ -268,6 +268,56 @@ export function carrySubscriptionStamp(
 }
 
 /**
+ * Stamp a verified, hashed subscription identity onto a reading that carries no
+ * account of its own, such as a shared reading standing in for a local lane, so
+ * it still coalesces with a sibling lane of the same subscription.
+ */
+export function stampSubscriptionIdentity(
+  report: ProviderQuota,
+  identity: string,
+): void {
+  if (CREDENTIAL_CONTEXT_ID.test(identity))
+    (report as SubscriptionStampedQuota)[SUBSCRIPTION_IDENTITY] = identity;
+}
+
+/** How long a lane's last local read keeps vouching for the lane's identity. */
+export const LANE_IDENTITY_RECHECK_SECONDS = 86_400;
+
+/**
+ * The hashed subscription a lane's own last local reading verified, so a shared
+ * reading of that subscription can stand in for the lane. The cache slot is the
+ * only place a lane's identity survives between runs. It is withheld when the
+ * slot is missing or unstamped, when the lane's last local read is older than
+ * {@link LANE_IDENTITY_RECHECK_SECONDS} (a lane served from shared readings
+ * never rewrites its slot, so a login switched on this machine would otherwise
+ * go unnoticed forever), or when a credential file that reading was derived
+ * from has changed since. Nothing is guessed: no stamp means a local read.
+ */
+export function cachedLaneSubscription(
+  provider: ProviderId,
+  accountKey: string | undefined,
+  now: number = Date.now(),
+): string | undefined {
+  try {
+    const record = readCachedRecord(provider, accountKey);
+    if (!record) return undefined;
+    const readAt = Date.parse(record.snapshot.state.refreshedAt ?? "");
+    if (
+      !Number.isFinite(readAt) ||
+      readAt > now ||
+      now - readAt > LANE_IDENTITY_RECHECK_SECONDS * 1_000
+    )
+      return undefined;
+    const stamp = record.reuse;
+    if (stamp && inputsDigest(stamp.inputs) !== stamp.inputsDigest)
+      return undefined;
+    return subscriptionIdentity(record.snapshot);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fresh lane readings a published reading superseded when it coalesced lanes
  * of one subscription. `writeCachedProviders` persists each in its own slot in
  * the same write as the winner, so a route that later fails still serves its
@@ -903,6 +953,8 @@ function parseCacheProviders(raw: unknown): CachedProvider[] | undefined {
 function toCacheProvider(provider: ProviderQuota): CachedProvider | undefined {
   // Declared config values are re-read every run and must not outlive edits.
   if (provider.declared) return undefined;
+  // An imported or shared reading observed nothing locally.
+  if (provider.state.importedFrom) return undefined;
   // A reading served from the cache observed nothing new; rewriting it would
   // only relabel an old observation.
   if (

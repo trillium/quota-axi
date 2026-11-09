@@ -22,6 +22,8 @@ export type QuotaFlags = {
   export: boolean;
   /** Do not read declared custom quota sources. */
   noSources: boolean;
+  /** Read every local lane itself even when a declared source shares a fresh reading. */
+  noShared: boolean;
   tui: boolean;
   allowKeychainPrompt: boolean;
   /** Permit one bounded Claude inference to recover env-token quota headers. */
@@ -141,6 +143,7 @@ function parseCommonFlags(
   let full = false;
   let exportMode = false;
   let noSources = false;
+  let noShared = false;
   let tui = false;
   let once = false;
   let activeOnly = false;
@@ -175,6 +178,10 @@ function parseCommonFlags(
     }
     if (arg === "--no-sources") {
       noSources = true;
+      continue;
+    }
+    if (arg === "--no-shared") {
+      noShared = true;
       continue;
     }
     if (arg === "--tui") {
@@ -329,6 +336,7 @@ function parseCommonFlags(
     full,
     export: exportMode,
     noSources,
+    noShared,
     tui,
     once,
     activeOnly,

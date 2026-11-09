@@ -213,6 +213,7 @@ describe("CLI flag parsing", () => {
         profileOnly: false,
         export: false,
         noSources: false,
+        noShared: false,
       },
     );
     expect(parseFlags(["--tui"]).tui).toBe(true);
@@ -221,6 +222,7 @@ describe("CLI flag parsing", () => {
     expect(parseFlags(["--tui"]).activeOnly).toBe(false);
     expect(parseFlags(["--export"]).export).toBe(true);
     expect(parseFlags(["--no-sources"]).noSources).toBe(true);
+    expect(parseFlags(["--no-shared"]).noShared).toBe(true);
   });
 
   it("parses whole-unit refresh intervals for the live report", () => {

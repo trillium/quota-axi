@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { normalizeCachedWindow } from "./cache.js";
+import { normalizeCachedWindow, stampSubscriptionIdentity } from "./cache.js";
 import {
   PROVIDER_RESPONSE_LIMIT_BYTES,
   providerFetch,
@@ -7,7 +7,9 @@ import {
 } from "./lib/http.js";
 import {
   type QuotaSourceDeclaration,
+  type QuotaSourceSupplies,
   readQuotaSources,
+  readSharedFirst,
 } from "./lib/user-config.js";
 import {
   servableStaleWindows,
@@ -467,6 +469,19 @@ export function sourceLanes(
   return lanes;
 }
 
+function sourceLaneEntries(
+  source: QuotaSourceDeclaration,
+  result: SourceReportResult,
+  now: number,
+): SourceLane[] {
+  // `sourceLanes` yields exactly one lane per `supplies` entry, in order.
+  return sourceLanes(source, result, now).map((lane, index) => ({
+    lane,
+    source,
+    entry: source.supplies[index],
+  }));
+}
+
 function failedLane(
   provider: ProviderId,
   accountKey: string,
@@ -494,6 +509,160 @@ function failedLane(
   };
 }
 
+/** One declared `supplies` entry's lane, with the declaration that produced it. */
+type SourceLane = {
+  lane: ProviderQuota;
+  source: QuotaSourceDeclaration;
+  entry: QuotaSourceSupplies;
+};
+
+/**
+ * What a local lane knows about itself when it asks whether a source can stand
+ * in for it: its `accountKey` as discovered (`default` for the single selected
+ * lane), and, lazily, the hashed subscription its own last local read verified.
+ */
+export type SharedLaneQuery = {
+  provider: ProviderId;
+  laneKey: string;
+  identity(): string | undefined;
+};
+
+/**
+ * Declared sources read in parallel with local discovery. Source lanes a local
+ * lane claims are the local lane's reading from then on, so a claimed lane is
+ * not also reported as its own `source:` row.
+ */
+export type DeclaredSources = {
+  /**
+   * The fresh reading of a declared source that stands in for this local lane,
+   * or `undefined` when none does and the lane must be read locally. Matches
+   * are explicit only: the entry's `standsFor` names this lane, or the entry
+   * names none and the source's verified `subscription` equals the one the
+   * lane's own last local read stamped. Email, label, and position never match.
+   * A missing, failed, stale, or too-old reading never matches.
+   */
+  claim(query: SharedLaneQuery): Promise<ProviderQuota | undefined>;
+  /** Every source lane no local lane claimed. */
+  unclaimed(): Promise<ProviderQuota[]>;
+};
+
+/**
+ * Start reading all declared sources that supply any of the in-scope providers.
+ * Reads begin at once; a local lane waits for them only when a declared entry
+ * could stand in for it. `share: false` disables claims, not the source rows.
+ */
+export function startDeclaredSources(
+  providers: ProviderId[],
+  explicitProviders = false,
+  options?: {
+    signal?: AbortSignal;
+    file?: string;
+    now?: number;
+    share?: boolean;
+  },
+): DeclaredSources {
+  const sources = readQuotaSources(options?.file, providers, explicitProviders);
+  if (sources.length === 0) {
+    return { claim: async () => undefined, unclaimed: async () => [] };
+  }
+  const sharing = options?.share !== false && readSharedFirst(options?.file);
+
+  const now = options?.now ?? Date.now();
+  const read: Promise<SourceLane[]> = Promise.all(
+    sources.map(async (source) => {
+      const result = await readSource(source, options?.signal);
+      return sourceLaneEntries(source, result, now);
+    }),
+  ).then((groups) =>
+    groups.flat().filter(({ lane }) => providers.includes(lane.provider)),
+  );
+  const claimed = new Set<SourceLane>();
+
+  return {
+    async claim(query) {
+      if (!sharing) return undefined;
+      const candidates = sources
+        .filter((source) => source.share !== false)
+        .flatMap((source) => source.supplies)
+        .filter((entry) => entry.provider === query.provider);
+      const explicit = candidates.some(
+        (entry) => entry.standsFor === query.laneKey,
+      );
+      const bySubscription = candidates.some(
+        (entry) => entry.standsFor === undefined,
+      );
+      if (!explicit && !bySubscription) return undefined;
+      const identity = query.identity();
+      if (!explicit && identity === undefined) return undefined;
+
+      let lanes: SourceLane[];
+      try {
+        lanes = await read;
+      } catch {
+        return undefined;
+      }
+      const hit = lanes.find(
+        (candidate) =>
+          !claimed.has(candidate) &&
+          candidate.source.share !== false &&
+          candidate.entry.provider === query.provider &&
+          isShareable(candidate.lane) &&
+          (explicit
+            ? candidate.entry.standsFor === query.laneKey &&
+              // A declared stand-in is still refused when both sides verify
+              // different subscriptions, so a mistyped `standsFor` cannot
+              // swap one account's numbers for another's.
+              (identity === undefined ||
+                candidate.lane.subscription === undefined ||
+                candidate.lane.subscription === identity)
+            : candidate.entry.standsFor === undefined &&
+              candidate.lane.subscription === identity),
+      );
+      if (!hit) return undefined;
+      claimed.add(hit);
+      return servedLane(hit, explicit ? undefined : identity);
+    },
+    async unclaimed() {
+      try {
+        return (await read)
+          .filter((candidate) => !claimed.has(candidate))
+          .map(({ lane }) => lane);
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
+/** A reading a local lane may stand on: fresh, within `maxAge`, with windows. */
+function isShareable(lane: ProviderQuota): boolean {
+  return (
+    lane.state.status === "fresh" &&
+    !lane.state.stale &&
+    lane.state.importedFrom !== undefined &&
+    lane.windows.length > 0
+  );
+}
+
+/**
+ * The source's reading as the local lane's own: it names no key of its own (the
+ * collector stamps the lane's), keeps `importedFrom` so it is never cached or
+ * exported as local, and says which source served it.
+ */
+function servedLane(
+  hit: SourceLane,
+  identity: string | undefined,
+): ProviderQuota {
+  const served: ProviderQuota = {
+    ...hit.lane,
+    state: { ...hit.lane.state, sharedFrom: hit.source.name },
+  };
+  delete served.accountKey;
+  delete served.accountKeys;
+  if (identity !== undefined) stampSubscriptionIdentity(served, identity);
+  return served;
+}
+
 /**
  * Read all declared sources that supply any of the in-scope providers in parallel.
  */
@@ -506,18 +675,10 @@ export async function readDeclaredSources(
     now?: number;
   },
 ): Promise<ProviderQuota[]> {
-  const sources = readQuotaSources(options?.file, providers, explicitProviders);
-  if (sources.length === 0) return [];
-
-  const now = options?.now ?? Date.now();
-  const sourcePromises = sources.map(async (source) => {
-    const result = await readSource(source, options?.signal);
-    return sourceLanes(source, result, now);
-  });
-
-  const laneGroups = await Promise.all(sourcePromises);
-  const flattened = laneGroups.flat();
-  return flattened.filter((lane) => providers.includes(lane.provider));
+  return startDeclaredSources(providers, explicitProviders, {
+    ...options,
+    share: false,
+  }).unclaimed();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

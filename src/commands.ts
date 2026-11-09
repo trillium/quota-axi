@@ -47,7 +47,7 @@ import {
   renderModelsToon,
   renderQuotaToon,
 } from "./render.js";
-import { readDeclaredSources } from "./sources.js";
+import { type DeclaredSources, startDeclaredSources } from "./sources.js";
 import { formatInterval, runLiveTui, type LiveTuiIo } from "./tui-live.js";
 import {
   detectTuiColorDepth,
@@ -84,7 +84,10 @@ export async function quotaCommand(
     refreshCredentials: flags.profileOnly ? false : !flags.noCredentialRefresh,
     ...(flags.allowClaudeInference ? { allowClaudeInference: true } : {}),
     ...(flags.profileOnly ? { credentialMode: "profile-only" as const } : {}),
-    ...(flags.noSources ? { noSources: true } : {}),
+    // An export publishes this machine's own readings, so it never reads, and
+    // never re-exports, another machine's.
+    ...(flags.noSources || flags.export ? { noSources: true } : {}),
+    ...(flags.noShared ? { noShared: true } : {}),
   };
 
   const maxAgeSeconds = flags.profileOnly ? 0 : readMaxAge(flags);
@@ -346,6 +349,7 @@ export async function modelsCommand(
     allowKeychainPrompt: flags.allowKeychainPrompt,
     refreshCredentials: !flags.noCredentialRefresh,
     ...(flags.noSources ? { noSources: true } : {}),
+    ...(flags.noShared ? { noShared: true } : {}),
   };
   const quota = await fetchQuota(
     flags.providers,
@@ -380,9 +384,9 @@ export async function authCommand(
       ["Run `quota-axi --export` to publish quota readings"],
     );
   }
-  if (flags.noSources) {
+  if (flags.noSources || flags.noShared) {
     throw new AxiError(
-      "--no-sources is only supported by the quota and models commands",
+      `${flags.noSources ? "--no-sources" : "--no-shared"} is only supported by the quota and models commands`,
       "VALIDATION_ERROR",
       ["auth always inspects local credentials"],
     );
@@ -496,8 +500,15 @@ export async function fetchQuota(
   // Providers a lock holder already cached, so the report-wide write below
   // does not stamp them a second time
   const cached = new Set<ProviderId>();
-  const [fetched, sourceLanes] = await Promise.all([
-    Promise.all(
+  // Source reads start now, in parallel with local discovery; a local lane a
+  // fresh shared reading stands in for waits for them instead of its vendor.
+  const declared = readsSources
+    ? startDeclaredSources(providers, explicitProviders, {
+        share: !options.noShared,
+      })
+    : undefined;
+  const fetched = (
+    await Promise.all(
       providers.map((provider) =>
         snapshot
           ? snapshotReadings(provider, snapshot)
@@ -506,13 +517,12 @@ export async function fetchQuota(
               options,
               writesCache ? maxAgeSeconds : 0,
               () => cached.add(provider),
+              declared,
             ),
       ),
-    ).then((r) => r.flat()),
-    readsSources
-      ? readDeclaredSources(providers, explicitProviders)
-      : Promise.resolve([]),
-  ]);
+    )
+  ).flat();
+  const sourceLanes = declared ? await declared.unclaimed() : [];
 
   const merged: ProviderQuota[] = [];
   for (const provider of providers) {
@@ -531,9 +541,13 @@ export async function fetchQuota(
   );
   if (writesCache) {
     writeCachedProvidersBestEffort(
+      // A lane a declared source stood in for stays in the write, so the
+      // provider's reuse stamp is withheld instead of covering a partial
+      // report; the cache itself never stores it.
       results.filter(
         (provider) =>
-          !cached.has(provider.provider) && !provider.state.importedFrom,
+          !cached.has(provider.provider) &&
+          (!provider.state.importedFrom || provider.state.sharedFrom),
       ),
       generatedAt,
     );
@@ -556,17 +570,19 @@ async function readProvider(
   options: ProviderOptions,
   maxAgeSeconds: number,
   markCached: () => void,
+  declared?: DeclaredSources,
 ): Promise<ProviderQuota[]> {
-  if (!(maxAgeSeconds > 0)) return tracedReadings(provider, options);
+  if (!(maxAgeSeconds > 0)) return tracedReadings(provider, options, declared);
   const reused = reusableReadings(provider, maxAgeSeconds);
   if (reused) return reused;
   const turn = await takeFetchTurn(fetchLockPathFor(provider), () =>
     reusableReadings(provider, maxAgeSeconds),
   );
   if (turn.kind === "answered") return turn.value;
-  if (turn.kind === "unlocked") return tracedReadings(provider, options);
+  if (turn.kind === "unlocked")
+    return tracedReadings(provider, options, declared);
   try {
-    const readings = await tracedReadings(provider, options);
+    const readings = await tracedReadings(provider, options, declared);
     const readingAt = nowIso();
     writeCachedProvidersBestEffort(
       readings.map((reading) => withQuotaSemantics(reading, readingAt)),
@@ -601,9 +617,10 @@ function snapshotFile(): string | undefined {
 async function tracedReadings(
   provider: ProviderId,
   options: ProviderOptions,
+  declared?: DeclaredSources,
 ): Promise<ProviderQuota[]> {
   const { value, inputs } = await withInputTrace(() =>
-    fetchAccountQuotas(PROVIDERS[provider], options),
+    fetchAccountQuotas(PROVIDERS[provider], options, declared),
   );
   for (const reading of value) stampReadingInputs(reading, inputs);
   return value;

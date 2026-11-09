@@ -1,0 +1,8 @@
+flowchart TD
+  A[quota-axi starts] --> B[read declared sources in the background]
+  A --> C[discover local lanes]
+  C --> D{declared entry standsFor this lane,<br/>or same verified subscription hash?}
+  D -- no --> L[read the lane locally]
+  D -- yes --> E{shared reading fresh<br/>within the source maxAge?}
+  E -- no: missing, failed, stale --> L
+  E -- yes --> S[serve the lane from the shared reading<br/>no vendor call, marked sharedFrom]
