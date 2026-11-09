@@ -285,6 +285,14 @@ pnpm run build
 pnpm run dev
 ```
 
+**A checkout as the global `quota-axi`**
+
+```sh
+scripts/install-fork.sh
+```
+
+Builds the checkout and installs it globally with the version stamped `<version>-fork.<short sha>`, so `quota-axi --version` shows it is not the published build. The stamp lands on a staging copy; the checkout's `package.json` is untouched. Roll back with `npm install -g quota-axi@<version>`.
+
 ## Agent Skill
 
 The npm package includes `skills/quota-axi/SKILL.md`, the same installable skill recommended above.
