@@ -526,8 +526,12 @@ export async function fetchQuota(
 
   const merged: ProviderQuota[] = [];
   for (const provider of providers) {
-    const local = fetched.filter((p) => p.provider === provider);
+    let local = fetched.filter((p) => p.provider === provider);
     const remote = sourceLanes.filter((p) => p.provider === provider);
+    // A parent fills in a provider this machine has no reading for at all
+    if (declared && !local.some(hasLocalReading)) {
+      local = (await declared.parentFor(provider)) ?? local;
+    }
     merged.push(...local, ...remote);
   }
 
@@ -556,6 +560,11 @@ export async function fetchQuota(
     generatedAt,
     providers: results,
   });
+}
+
+/** A reading with windows to show: fresh, or a stale one with windows kept. */
+function hasLocalReading(reading: ProviderQuota): boolean {
+  return reading.windows.length > 0;
 }
 
 /**

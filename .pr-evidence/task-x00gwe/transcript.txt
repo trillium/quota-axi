@@ -1,0 +1,23 @@
+$ quota-axi --provider claude   # login-less host, parent configured
+bin: /Users/trilliumsmith/.treehouse/quota-axi-141acb/3/quota-axi/dist/bin/quota-axi.js
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-12T01:43:46.273Z"
+quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,58,-0.9032,projected_exhaustion,established,five_hour,"2026-11-12T03:13:43.000Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  claude,all_models,2490,"2026-11-12T02:25:16.507Z",five_hour
+attention[1]{provider,scope,kind,detail,remedy}:
+  claude,all,shared,"macbook · last refreshed 2026-11-12T01:41:43.000Z",none
+help[1]:
+  Run `quota-axi --full` for windows, pace, reserve, and account evidence
+
+$ quota-axi --provider claude --no-sources   # parent bypassed
+bin: /Users/trilliumsmith/.treehouse/quota-axi-141acb/3/quota-axi/dist/bin/quota-axi.js
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2026-11-12T01:43:46.605Z"
+quota[0]:
+exhaustion[0]:
+attention[1]{provider,scope,kind,detail,remedy}:
+  claude,all,auth_required,credentials_missing,none
+help[1]:
+  Run `quota-axi --full` for windows, pace, reserve, and account evidence
