@@ -656,6 +656,20 @@ A source reading stands in for a local lane only on explicit identity, never by 
 }
 ```
 
+A receiver that names sources by account email (for example the fm_quota receiver, `GET /fm_quota/<account-email>`) is declared the same way: the response is a plain schema 5 report, so no wrapper or per-source adapter is needed, and the email goes in the URL path as the source name.
+
+```json
+{
+  "name": "mbcurtin-gmail-com",
+  "url": "http://100.84.99.99:8794/fm_quota/mbcurtin@gmail.com",
+  "allowInsecureTransport": true,
+  "supplies": [{ "provider": "claude", "accountKey": "default" }],
+  "maxAge": "15m"
+}
+```
+
+Without `standsFor` the reading is listed as `source:mbcurtin-gmail-com:default`; add `standsFor` to also serve a local lane from it.
+
 - **Freshness bound**: the source's `maxAge` is the single bound. A reading no older than `maxAge` is fresh and may stand in for a local read; an older one is reported as a stale source row and the lane is read locally. Choose it from how often the producer pushes: a one-minute push with `maxAge: "3m"` shares nearly always and checks locally when the pusher stops.
 - **Switches**: `"sharedFirst": false` at the top of `config.json` turns the behavior off for every source, `"share": false` on one source turns it off for that source, and `--no-shared` turns it off for one run. In each case sources are still read and listed as `source:<name>:<accountKey>` rows, and every lane is read locally. `--no-sources` reads no source at all. A non-boolean `sharedFirst` or `share` is a validation error.
 - **Output**: a served lane keeps its local `accountKey` (or none, for the single selected lane, so a report that never expanded keeps its shape) and is not also listed as a `source:` row. It carries `state.sharedFrom` (the source name) together with `state.importedFrom` and the reading's own `refreshedAt`, and default TOON adds an `attention[]` row of kind `shared` (`<source> · last refreshed <time>`); `--tui` titles the card `shared <age>`. Lanes read locally carry neither marker.
