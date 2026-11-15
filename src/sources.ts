@@ -544,6 +544,13 @@ export type DeclaredSources = {
   claim(query: SharedLaneQuery): Promise<ProviderQuota | undefined>;
   /** Every source lane no local lane claimed. */
   unclaimed(): Promise<ProviderQuota[]>;
+  /**
+   * A parent's readings for a provider this machine could not read itself, or
+   * `undefined` when no parent has a usable one and the local result stands.
+   * Fresh or stale passes through with its own `refreshedAt`; a failed parent
+   * lane never replaces a local result.
+   */
+  parentFor(provider: ProviderId): Promise<ProviderQuota[] | undefined>;
 };
 
 /**
@@ -563,7 +570,11 @@ export function startDeclaredSources(
 ): DeclaredSources {
   const sources = readQuotaSources(options?.file, providers, explicitProviders);
   if (sources.length === 0) {
-    return { claim: async () => undefined, unclaimed: async () => [] };
+    return {
+      claim: async () => undefined,
+      unclaimed: async () => [],
+      parentFor: async () => undefined,
+    };
   }
   const sharing = options?.share !== false && readSharedFirst(options?.file);
 
@@ -571,7 +582,11 @@ export function startDeclaredSources(
   const read: Promise<SourceLane[]> = Promise.all(
     sources.map(async (source) => {
       const result = await readSource(source, options?.signal);
-      return sourceLaneEntries(source, result, now);
+      return sourceLaneEntries(
+        source.parent ? parentDeclaration(source, result) : source,
+        result,
+        now,
+      );
     }),
   ).then((groups) =>
     groups.flat().filter(({ lane }) => providers.includes(lane.provider)),
@@ -622,10 +637,30 @@ export function startDeclaredSources(
       claimed.add(hit);
       return servedLane(hit, explicit ? undefined : identity);
     },
+    async parentFor(provider) {
+      let lanes: SourceLane[];
+      try {
+        lanes = await read;
+      } catch {
+        return undefined;
+      }
+      const usable = lanes.filter(
+        ({ lane, source }) =>
+          source.parent === true &&
+          lane.provider === provider &&
+          lane.windows.length > 0 &&
+          (lane.state.status === "fresh" || lane.state.status === "stale"),
+      );
+      if (usable.length === 0) return undefined;
+      return usable.map((hit) => parentLane(hit, usable.length > 1));
+    },
     async unclaimed() {
       try {
         return (await read)
-          .filter((candidate) => !claimed.has(candidate))
+          .filter(
+            (candidate) =>
+              !claimed.has(candidate) && candidate.source.parent !== true,
+          )
           .map(({ lane }) => lane);
       } catch {
         return [];
@@ -661,6 +696,49 @@ function servedLane(
   delete served.accountKeys;
   if (identity !== undefined) stampSubscriptionIdentity(served, identity);
   return served;
+}
+
+/**
+ * A parent declares no `supplies`: its report names them. One entry per lane
+ * the parent reports, keyed as the parent keys it.
+ */
+function parentDeclaration(
+  source: QuotaSourceDeclaration,
+  result: SourceReportResult,
+): QuotaSourceDeclaration {
+  if (result.status !== "success") return source;
+  const supplies: QuotaSourceSupplies[] = [];
+  const seen = new Set<string>();
+  for (const row of result.report.providers) {
+    if (!isRecord(row) || !(row.provider in PROVIDERS)) continue;
+    const accountKey =
+      typeof row.accountKey === "string" ? row.accountKey : "default";
+    if (!/^[a-z0-9][a-z0-9:_-]{0,95}$/.test(accountKey)) continue;
+    const id = `${row.provider}:${accountKey}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    supplies.push({ provider: row.provider, accountKey });
+  }
+  return { ...source, supplies };
+}
+
+/**
+ * A parent lane standing in for a provider with no local reading. It keeps the
+ * parent's own key only when the parent reports several lanes for the provider.
+ */
+function parentLane(hit: SourceLane, multiple: boolean): ProviderQuota {
+  const lane: ProviderQuota = {
+    ...hit.lane,
+    state: { ...hit.lane.state, sharedFrom: hit.source.name },
+  };
+  if (multiple) {
+    lane.accountKey = hit.entry.accountKey;
+    lane.accountKeys = [hit.entry.accountKey];
+  } else {
+    delete lane.accountKey;
+    delete lane.accountKeys;
+  }
+  return lane;
 }
 
 /**

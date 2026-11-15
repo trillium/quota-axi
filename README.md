@@ -661,6 +661,30 @@ A source reading stands in for a local lane only on explicit identity, never by 
 - **Output**: a served lane keeps its local `accountKey` (or none, for the single selected lane, so a report that never expanded keeps its shape) and is not also listed as a `source:` row. It carries `state.sharedFrom` (the source name) together with `state.importedFrom` and the reading's own `refreshedAt`, and default TOON adds an `attention[]` row of kind `shared` (`<source> · last refreshed <time>`); `--tui` titles the card `shared <age>`. Lanes read locally carry neither marker.
 - **Safety**: no credential or authorization header is sent to a source, and a source failure never fails a local read. A served lane is never written to the local cache (so it never serves later as a local reading, and a provider with a served lane gets no fresh-reuse stamp) and `--export` never publishes it. An export also reads no source, so a published reading is always this machine's own.
 
+#### Parent source
+
+A host with no login of its own (no Claude credential, say) cannot measure usage, but another machine's quota-axi can. Declare that machine's `--export` report as a parent and this host reports the parent's numbers for every provider it cannot read itself:
+
+```json
+{
+  "sources": [
+    {
+      "name": "macbook",
+      "url": "http://100.84.99.99:8794/fm_quota/macbook",
+      "allowInsecureTransport": true,
+      "parent": true,
+      "maxAge": "15m"
+    }
+  ]
+}
+```
+
+- **Declaration**: `"parent": true` replaces `supplies` (declaring both, or `share`, is a validation error). Transport, `maxAge`, `timeout`, and the no-credentials rule are the same as any custom source.
+- **Subordinate**: a provider fills in from the parent only when the local read produced no windows at all. A working local reading, fresh or stale, always wins and the parent is not consulted for it. A parent that is unreachable, malformed, or reports the provider as failed changes nothing: the local result stands.
+- **Provenance and staleness**: a filled-in lane carries `state.sharedFrom` and `state.importedFrom` (the parent's name) and the parent's own `refreshedAt`, with the same `shared` attention row as shared-first. A parent reading older than `maxAge`, or one the parent itself marked stale, is passed through as `stale` with `source_reading_too_old` or `source_stale`, never as fresh.
+- **Lane keys**: a provider the parent reports once is served as this host's single lane (no `accountKey`). One the parent reports as several lanes keeps the parent's `accountKey`s.
+- **Safety**: nothing is sent to the parent, a filled-in lane is never cached locally, and `--export` never re-publishes it. `--no-sources` bypasses a parent.
+
 ## Output Model
 
 The `quota` command's `--json` emits `schemaVersion: 5`, or `6` when a provider expands to multiple accounts.

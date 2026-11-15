@@ -112,6 +112,12 @@ export type QuotaSourceDeclaration = {
   timeout: number;
   /** Present only as `false`: this source never stands in for a local read. */
   share?: false;
+  /**
+   * Present only as `true`: this source is a parent quota-axi. It declares no
+   * `supplies`; every provider it reports fills in a provider this machine
+   * cannot read itself.
+   */
+  parent?: true;
 };
 
 const ALLOWED_SOURCE_KEYS = new Set([
@@ -123,6 +129,7 @@ const ALLOWED_SOURCE_KEYS = new Set([
   "maxAge",
   "timeout",
   "share",
+  "parent",
 ]);
 
 const ALLOWED_SUPPLIES_KEYS = new Set([
@@ -155,6 +162,7 @@ export function readQuotaSources(
   // Determine which raw sources are in scope
   const inScope = config.sources.filter((raw) => {
     if (!explicitProviders || inScopeProviders === undefined) return true;
+    if (isRecord(raw) && raw.parent === true) return true;
     const supplies = rawSuppliesList(raw);
     return supplies.some(
       (entry) =>
@@ -288,7 +296,30 @@ export function readQuotaSources(
       url = parsedUrl.href;
     }
 
-    if (!Array.isArray(raw.supplies) || raw.supplies.length === 0) {
+    if (raw.parent !== undefined && typeof raw.parent !== "boolean") {
+      throw new AxiError(
+        `source ${name} parent must be a boolean`,
+        "VALIDATION_ERROR",
+      );
+    }
+    const parent = raw.parent === true;
+    if (parent && raw.supplies !== undefined) {
+      throw new AxiError(
+        `source ${name} is a parent and must not declare supplies`,
+        "VALIDATION_ERROR",
+        ["Remove supplies: a parent fills in whatever providers it reports"],
+      );
+    }
+    if (parent && raw.share !== undefined) {
+      throw new AxiError(
+        `source ${name} is a parent and must not declare share`,
+        "VALIDATION_ERROR",
+      );
+    }
+    if (
+      !parent &&
+      (!Array.isArray(raw.supplies) || raw.supplies.length === 0)
+    ) {
       throw new AxiError(
         `source ${name} supplies must be a non-empty array`,
         "VALIDATION_ERROR",
@@ -296,7 +327,7 @@ export function readQuotaSources(
     }
 
     const supplies: QuotaSourceSupplies[] = [];
-    for (const entry of raw.supplies) {
+    for (const entry of parent ? [] : (raw.supplies as unknown[])) {
       if (!isRecord(entry)) {
         throw new AxiError(
           `source ${name} supplies entry must be an object`,
@@ -437,6 +468,7 @@ export function readQuotaSources(
       maxAge: maxAgeSeconds,
       timeout: timeoutSeconds,
       ...(raw.share === false ? { share: false as const } : {}),
+      ...(parent ? { parent: true as const } : {}),
     });
   }
 
