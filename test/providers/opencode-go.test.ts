@@ -1164,6 +1164,49 @@ describe("OpenCode Go multi-source credentials", () => {
     });
   });
 
+  it("reports a valid key without a Go subscription as its own auth_required code", async () => {
+    const entitlement = () =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "EntitlementError",
+            message: "OpenCode Go subscription required.",
+          },
+        }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      );
+    const report = await createOpenCodeGoAdapter({
+      credentialSources: sources({
+        status: "available",
+        key: KEY,
+        path: "/oc/auth.json",
+      }),
+      fetch: vi.fn(async () => entitlement()),
+    }).fetchQuota(OPTIONS);
+    expect(report.state).toMatchObject({
+      status: "auth_required",
+      error: "opencode_go_subscription_required",
+    });
+    expect(JSON.stringify(report)).not.toContain(KEY);
+
+    const mixed = await createOpenCodeGoAdapter({
+      credentialSources: sources(
+        { status: "available", key: KEY, path: "/oc/auth.json" },
+        { status: "available", key: PI_KEY, path: PI_AUTH_PATH },
+      ),
+      fetch: vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Headers(init?.headers).get("authorization") === `Bearer ${KEY}`
+          ? entitlement()
+          : new Response(null, { status: 401 }),
+      ),
+    }).fetchQuota(OPTIONS);
+    expect(mixed.state).toMatchObject({
+      status: "auth_required",
+      error: "provider_auth_rejected",
+    });
+  });
+
   it("reports auth_required only after every candidate is rejected", async () => {
     const request = vi.fn(async () => new Response(null, { status: 403 }));
     const report = await createOpenCodeGoAdapter({
