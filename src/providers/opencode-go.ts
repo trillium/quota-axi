@@ -45,6 +45,9 @@ export const PI_OPENCODE_GO_AUTH_ENV = "QUOTA_AXI_OPENCODE_GO_PI_AUTH";
 const PI_OPENCODE_GO_PROVIDER_ID = "opencode-go";
 const OPENCODE_GO_INTEGRATION_ID = "opencode-go";
 
+/** The key is valid but its workspace holds no OpenCode Go subscription. */
+const SUBSCRIPTION_REQUIRED = "opencode_go_subscription_required";
+
 const LABEL = "OpenCode Go";
 const RESPONSE_LIMIT_BYTES = 262_144;
 const BODY_CLEANUP_TIMEOUT_MS = 100;
@@ -382,7 +385,7 @@ async function attemptCandidate(
     return { kind: "quota", result: normalized };
   } catch (error) {
     const code = errorCode(error);
-    if (code === "provider_auth_rejected") {
+    if (code === "provider_auth_rejected" || code === SUBSCRIPTION_REQUIRED) {
       return { kind: "rejected", error: code };
     }
     return { kind: "transient", error: code };
@@ -447,10 +450,15 @@ function selectionFailureFor(
       );
     case "all_rejected": {
       const indeterminate = indeterminateFailureFor(resolved);
+      // A key the vendor accepted but that carries no Go plan is reported as
+      // such, unless some other key was outright rejected.
+      const noPlan =
+        selection.results.length > 0 &&
+        selection.results.every(({ error }) => error === SUBSCRIPTION_REQUIRED);
       return (
         indeterminate ?? {
           status: "auth_required",
-          code: "provider_auth_rejected",
+          code: noPlan ? SUBSCRIPTION_REQUIRED : "provider_auth_rejected",
         }
       );
     }
@@ -575,6 +583,12 @@ async function requestUsage(
       }, deadlineMs);
     });
     const response = await Promise.race([fetchPromise, timeoutPromise]);
+    if (
+      response.status === 403 &&
+      (await isEntitlementError(response, controller.signal))
+    ) {
+      throw new Error(SUBSCRIPTION_REQUIRED);
+    }
     if (!response.ok) {
       await cancelResponseBody(response);
     }
@@ -594,6 +608,7 @@ async function requestUsage(
     if (
       error instanceof Error &&
       (error.message.startsWith("provider_") ||
+        error.message === SUBSCRIPTION_REQUIRED ||
         error.message === "response_too_large" ||
         error.message === "response_size_unverifiable" ||
         error.message === "malformed_json")
@@ -602,6 +617,27 @@ async function requestUsage(
     throw new Error("network_unavailable", { cause: error });
   } finally {
     if (timeout) clearTimeout(timeout);
+  }
+}
+
+/**
+ * The usage endpoint answers a valid key whose workspace has no Go
+ * subscription with 403 `{"error":{"type":"EntitlementError"}}`. The key is
+ * accepted (Zen/Go model listing still works); only the Go plan is absent, so
+ * it is not a sign-out. Only the error `type` is read, never echoed.
+ */
+async function isEntitlementError(
+  response: Response,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const body = await readResponseBody(response, signal);
+    const parsed = objectValue(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)),
+    );
+    return objectValue(parsed?.error)?.type === "EntitlementError";
+  } catch {
+    return false;
   }
 }
 
