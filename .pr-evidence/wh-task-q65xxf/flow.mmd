@@ -1,0 +1,8 @@
+flowchart LR
+  subgraph MacBook["MacBook (only querier)"]
+    V[vendor quota and reset endpoints] -->|ordinary quota-axi reads| C[(local quota cache)]
+    C -->|quota-axi publish: cache only, no vendor call| P[POST export tier]
+  end
+  P --> H[mini0 fm_quota hub]
+  H -->|GET, declared source| I[usage indicator]
+  H -->|GET, declared source| O[other machines]

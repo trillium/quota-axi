@@ -1,0 +1,31 @@
+# Real run of the built CLI against a local stand-in hub (cache seeded with two cached readings; no vendor contacted)
+$ quota-axi publish --status
+publisher: configured
+target: http://127.0.0.1:57927/fm_quota/macbook
+cachedProviders: 2
+newestRefreshedAt: 2026-11-24T16:34:48.913Z
+lastAttemptAt: never
+lastAttempt: none
+lastSuccessAt: never
+rule: single querier: <rule text, see README>
+
+$ quota-axi publish
+publish: posted
+target: http://127.0.0.1:57927/fm_quota/macbook
+providers: 2
+newestRefreshedAt: 2026-11-24T16:34:48.913Z
+posted: yes
+rule: single querier: <rule text, see README>
+
+$ quota-axi publish --status
+publisher: configured
+target: http://127.0.0.1:57927/fm_quota/macbook
+cachedProviders: 2
+newestRefreshedAt: 2026-11-24T16:34:48.913Z
+lastAttemptAt: 2026-11-24T16:34:49.904Z
+lastAttempt: ok
+lastSuccessAt: 2026-11-24T16:34:49.904Z
+rule: single querier: <rule text, see README>
+
+hub received:
+  POST /fm_quota/macbook (2043 bytes, providers: cursor,grok)

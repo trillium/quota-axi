@@ -5,20 +5,22 @@ import {
   quotaCommand,
   type QuotaContext,
 } from "./commands.js";
+import { PUBLISH_HELP, publishCommand } from "./publish.js";
 import { PROVIDER_IDS } from "./types.js";
 import { VERSION } from "./version.js";
 
 export const DESCRIPTION =
   "Report local agent-provider quota windows and model quota evidence.";
 
-export const TOP_HELP = `usage: quota-axi [quota|auth|models] [flags]
-commands[3]:
-  (none)=quota, auth, models
+export const TOP_HELP = `usage: quota-axi [quota|auth|models|publish] [flags]
+commands[4]:
+  (none)=quota, auth, models, publish (post this machine's cached readings to a hub; never queries a vendor, see quota-axi publish --help)
 output:
   Default TOON reports local quota evidence. Providers that are not set up are omitted and counted in one help line; --full and an explicit --provider list them. --json keeps every provider and sets notSetUp true on the absent ones. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (r refreshes, q quits); providers that are not set up fold into one line that a or --all expands.
   Repeated --provider flags accumulate in first-seen order: --provider zai --provider codex equals --provider zai,codex.
   --tui palette: --theme light|dark|system, else QUOTA_AXI_THEME, else dark. system follows OS appearance on each refresh; unavailable or unknown settings fall back to dark.
 notes:
+  publish posts this machine's cached readings to a hub and never queries a vendor; only the machine that owns the vendor logins queries vendors, and other machines read the hub copy as a declared source. publish flags: --to <url>, --allow-insecure-transport, --dry-run, --status.
   Every quota read, including each --tui refresh, may delegate an expired session's renewal to the vendor CLI that owns it. --no-credential-refresh disables delegated credential refresh; auth is always read-only.
   {"tui":{"show":"used"}} in ~/.config/quota-axi/config.json (or $XDG_CONFIG_HOME/quota-axi/config.json) makes --tui draw what each window has used instead of what is left, and {"tui":{"accountLabels":{"~/.claude-work":"work","claude-swap:<digest>":"team"}}} titles the lane with that config directory or account key claude · work or claude · team on its --tui card; neither changes TOON or JSON.
   Every read asks the vendor unless --max-age <duration> or QUOTA_AXI_MAX_AGE (the flag wins) opts into reuse: a provider's last successful reading is then served while younger than that bound and the credential selection and local credential files are unchanged, and processes starting together make one vendor read. --full ignores QUOTA_AXI_MAX_AGE, and --tui r always reads the vendor. A reused reading stays fresh and carries reused true plus its original refreshedAt. QUOTA_AXI_SNAPSHOT=<cache-format file> answers every provider from that file instead, for tests and fixtures.
@@ -69,15 +71,18 @@ export async function main(options: MainOptions = {}): Promise<void> {
       quota: quotaCommand,
       auth: authCommand,
       models: modelsCommand,
+      publish: (args) => publishCommand(args),
     },
     // `quota` is the implicit default command, so the bare-invocation home view
     // is never reached (see normalizeArgv); wiring it keeps the SDK contract.
     home: quotaCommand,
     resolveContext: () => ({ binPath }),
     getCommandHelp: (command) =>
-      command === "quota" || command === "auth" || command === "models"
-        ? TOP_HELP
-        : undefined,
+      command === "publish"
+        ? PUBLISH_HELP
+        : command === "quota" || command === "auth" || command === "models"
+          ? TOP_HELP
+          : undefined,
   });
 }
 
@@ -114,6 +119,7 @@ export function normalizeArgv(raw: string[]): string[] {
     first === "quota" ||
     first === "auth" ||
     first === "models" ||
+    first === "publish" ||
     first === "update"
   ) {
     return raw;
@@ -158,6 +164,7 @@ function findCommand(raw: string[]): number {
       arg === "quota" ||
       arg === "auth" ||
       arg === "models" ||
+      arg === "publish" ||
       arg === "update"
     ) {
       return index;

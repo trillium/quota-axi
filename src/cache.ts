@@ -492,6 +492,31 @@ export function readSnapshotProviders(
   return records.map(reusedReading);
 }
 
+/**
+ * Every cached reading this machine took itself, for the publisher. This is the
+ * only read the publisher makes: it never asks a vendor, so a publish cannot
+ * spend a vendor query. A record whose own window reset has already passed is
+ * left out (a number that has stopped being true is never served, #257), and
+ * so is one older than `maxAgeSeconds` or without a usable `refreshedAt`.
+ */
+export function readPublishableProviders(
+  maxAgeSeconds: number,
+  now: number = Date.now(),
+  file: string = cacheFilePath(),
+): ProviderQuota[] {
+  return readCacheProviders(file)
+    .filter((record) => {
+      const refreshedAt = Date.parse(record.snapshot.state.refreshedAt ?? "");
+      return (
+        Number.isFinite(refreshedAt) &&
+        refreshedAt <= now &&
+        now - refreshedAt < maxAgeSeconds * 1_000 &&
+        stillCurrent(record, now)
+      );
+    })
+    .map(reusedReading);
+}
+
 /** Whether no window of this reading has reached its own reported reset. */
 function stillCurrent(record: CachedProvider, now: number): boolean {
   return record.snapshot.windows.every(
