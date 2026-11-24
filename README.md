@@ -661,6 +661,28 @@ A source reading stands in for a local lane only on explicit identity, never by 
 - **Output**: a served lane keeps its local `accountKey` (or none, for the single selected lane, so a report that never expanded keeps its shape) and is not also listed as a `source:` row. It carries `state.sharedFrom` (the source name) together with `state.importedFrom` and the reading's own `refreshedAt`, and default TOON adds an `attention[]` row of kind `shared` (`<source> · last refreshed <time>`); `--tui` titles the card `shared <age>`. Lanes read locally carry neither marker.
 - **Safety**: no credential or authorization header is sent to a source, and a source failure never fails a local read. A served lane is never written to the local cache (so it never serves later as a local reading, and a provider with a served lane gets no fresh-reuse stamp) and `--export` never publishes it. An export also reads no source, so a published reading is always this machine's own.
 
+### Publishing to a hub
+
+`quota-axi publish` posts this machine's **cached** quota readings to a hub (for example mini0's `POST /fm_quota/<source>`), so the usage indicator and every other machine read that hub copy through a [declared source](#custom-quota-sources) instead of running quota-axi against vendors.
+
+**Single-querier rule.** Only the machine that owns the vendor logins (the MacBook) queries vendor quota and reset endpoints, through its own ordinary `quota-axi` reads. `publish` never queries a vendor: it reads only the local quota cache, never calls a provider adapter, credential store, or delegated refresh, and sends no credential or authorization header. Every other machine reads the hub's cached copy and never queries a vendor for it. The same rule is printed by `quota-axi publish`, `publish --dry-run`, and `publish --status`.
+
+```json
+{
+  "publish": {
+    "url": "http://100.84.99.99:8794/fm_quota/macbook",
+    "allowInsecureTransport": true,
+    "timeout": 5
+  }
+}
+```
+
+- **Target**: `publish.url` in `config.json`, or `--to <url>`. `https:` by default; plain `http:` needs `"allowInsecureTransport": true` or `--allow-insecure-transport`. Userinfo in the URL is never sent, and userinfo and query are never displayed or recorded. `timeout` is seconds (default 5, max 15).
+- **Payload**: the `--export` tier (schema 5 or 6 JSON): no account identity, locators, or attempts, and no imported source lanes. A reading is left out when one of its windows has already reached its own reset, or when it is older than 24 hours; the consumer's source `maxAge` applies on top of the original `refreshedAt`. An empty publishable cache is reported as `cache_empty` and nothing is posted.
+- **Keep the cache fresh**: run this machine's ordinary `quota-axi` reads (they write the cache); `publish` itself never refreshes it. Schedule `quota-axi publish` after them.
+- **Switches**: `--dry-run` builds the payload and posts nothing. `--status` makes no request and prints the target, the cached providers and newest `refreshedAt` the next publish would send, the last attempt (`publish-state.json` beside the cache, `0600`, no payload or secret), and the rule.
+- **Failure**: a hub error, timeout, or unreachable hub prints `publish: failed` with `hub_http_<status>`, `hub_timeout`, or `hub_unreachable`, sets exit code 1, and never affects local reads.
+
 ## Output Model
 
 The `quota` command's `--json` emits `schemaVersion: 5`, or `6` when a provider expands to multiple accounts.
